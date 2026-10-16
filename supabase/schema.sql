@@ -85,3 +85,7 @@ create policy "own cards" on public.cards
 drop policy if exists "own settings" on public.user_settings;
 create policy "own settings" on public.user_settings
   for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+-- Folders (added with the Library). Safe to run more than once.
+alter table public.notes add column if not exists folder_id text;
+alter table public.user_settings add column if not exists folders jsonb not null default '[]'::jsonb;

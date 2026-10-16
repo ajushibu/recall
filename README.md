@@ -23,7 +23,7 @@ supabase/schema.sql        tables, row-level security
 
 ## Setup
 
-1. **Supabase** (margin's project): SQL Editor → New query → paste `supabase/schema.sql` → Run.
+1. **Supabase** (margin's project): SQL Editor → New query → paste `supabase/schema.sql` → Run. (Safe to run again after updates.)
 2. **Local**
    ```bash
    npm install
@@ -53,6 +53,17 @@ supabase/schema.sql        tables, row-level security
 | `CLAUDE_MODEL` | Optional. Writes questions. Defaults to `claude-sonnet-5-5`. |
 | `CLAUDE_GRADE_MODEL` | Optional. Grades typed answers. Defaults to `claude-haiku-5-5`. |
 | `CLAUDE_EFFORT` | Optional. `low` (default), `medium`, `high` or `off`. |
+
+## Library (folders)
+Same as margin's Library:
+- Folders inside folders to any depth, with notes inside. Tap a folder to open or close it; tap a note to open it.
+- Each row's **⋯** button (or right-click) has the actions: for folders *New note here, New folder here, Rename, Move to…, Delete folder*; for notes *Open, Move to…, Delete note*.
+- The buttons under the tree are New note, New folder, Import, Sort (name or recent) and Collapse all. New notes, folders and imports go into the folder you last tapped; tap empty space to go back to the top level.
+- Drag rows to move them on a laptop or iPad. On phones use **Move to…**. A folder can't go inside itself.
+- Deleting a folder never deletes notes: its contents move up one level.
+- The folder chip at the top of a note (next to the date on phones) shows where it lives; tap it to move the note.
+- On a laptop the panel can be hidden with the button next to "Library".
+- Folders are stored in `user_settings.folders` and each note's `folder_id` (the last two lines of `supabase/schema.sql`). Until those lines have been run, folders work on the device and sync once they exist.
 
 ## How reviews work
 - New questions are due the day after you add a note to review. The Review tab shows today's set, capped by "Questions per day" in Settings.

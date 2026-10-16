@@ -39,7 +39,7 @@ function toast(msg, t = 3200) {
 const STORE_KEY = 'recall.store.v1', CONFIG_KEY = 'recall.config.v1';
 const loadJSON = (k, fb) => { try { const v = JSON.parse(localStorage.getItem(k)); return v ?? fb; } catch { return fb; } };
 const EPOCH = '1970-01-01T00:00:00.000Z';
-const defaultSettings = () => ({ daily_cap: 10, density: 'balanced', guidance: '', updated_at: EPOCH, _dirty: false });
+const defaultSettings = () => ({ daily_cap: 10, density: 'balanced', guidance: '', folders: [], updated_at: EPOCH, _dirty: false });
 
 let store = Object.assign({ notes: {}, cards: {}, settings: defaultSettings(), lastSync: {}, owner: null }, loadJSON(STORE_KEY, {}));
 store.settings = Object.assign(defaultSettings(), store.settings);
@@ -60,8 +60,8 @@ const saveConfig = () => localStorage.setItem(CONFIG_KEY, JSON.stringify(config)
 
 function touch(rec) { rec.updated_at = nowISO(); rec._dirty = true; persist(); scheduleSync(); }
 
-function newNote(title = 'Untitled', body = '') {
-  const n = { id: uid(), title, body, created_at: nowISO(), updated_at: nowISO(), deleted: false, gen_hash: null, gen_at: null, _dirty: true };
+function newNote(title = 'Untitled', body = '', folderId = null) {
+  const n = { id: uid(), title, body, folder_id: folderId || null, created_at: nowISO(), updated_at: nowISO(), deleted: false, gen_hash: null, gen_at: null, _dirty: true };
   store.notes[n.id] = n; persist(); scheduleSync(); return n;
 }
 const liveNotes = () => Object.values(store.notes).filter(n => !n.deleted);
@@ -199,6 +199,24 @@ function scheduleSync() {
 }
 const chunks = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };
 const toRow = r => { const { _dirty, ...rest } = r; return { ...rest, user_id: user.id }; };
+// Folders need two columns (notes.folder_id, user_settings.folders). Until the Supabase update has been run,
+// folders keep working on this device and sync once the columns exist.
+let folderCols = null; // null = not checked yet, true = present, false = missing
+let folderHintShown = false;
+async function probeFolderCols() {
+  const a = await sb.from('notes').select('folder_id').limit(1);
+  const b = await sb.from('user_settings').select('folders').limit(1);
+  const ok = !a.error && !b.error;
+  if (ok && store.foldersPending) { // columns just appeared: send what was kept local
+    liveNotes().forEach(n => { if (n.folder_id) n._dirty = true; });
+    store.settings._dirty = true; store.foldersPending = false;
+  }
+  folderCols = ok;
+  if (!ok && !folderHintShown && (folders().length || liveNotes().some(n => n.folder_id))) {
+    folderHintShown = true;
+    toast('Folders are saved on this device. Run the folder update in Supabase to sync them.', 6000);
+  }
+}
 const DATE_FIELDS = ['created_at', 'updated_at', 'gen_at', 'last_reviewed'];
 
 async function pushTable(table, map) {
@@ -206,7 +224,9 @@ async function pushTable(table, map) {
   if (!dirty.length) return;
   const snap = new Map(dirty.map(r => [r.id, r.updated_at]));
   for (const part of chunks(dirty, 200)) {
-    const { error } = await sb.from(table).upsert(part.map(toRow), { onConflict: 'id' });
+    const rows = part.map(toRow);
+    if (table === 'notes' && folderCols === false) rows.forEach(r => { if (r.folder_id) store.foldersPending = true; delete r.folder_id; });
+    const { error } = await sb.from(table).upsert(rows, { onConflict: 'id' });
     if (error) throw error;
   }
   dirty.forEach(r => { if (map[r.id] && map[r.id].updated_at === snap.get(r.id)) map[r.id]._dirty = false; });
@@ -235,9 +255,9 @@ async function syncSettings() {
   const s = store.settings;
   if (s._dirty) {
     const snap = s.updated_at;
-    const { error } = await sb.from('user_settings').upsert({
-      user_id: user.id, daily_cap: s.daily_cap, density: s.density, guidance: s.guidance, updated_at: s.updated_at
-    }, { onConflict: 'user_id' });
+    const row = { user_id: user.id, daily_cap: s.daily_cap, density: s.density, guidance: s.guidance, updated_at: s.updated_at };
+    if (folderCols) row.folders = folders(); else if (folders().length) store.foldersPending = true;
+    const { error } = await sb.from('user_settings').upsert(row, { onConflict: 'user_id' });
     if (error) throw error;
     if (store.settings.updated_at === snap) store.settings._dirty = false;
   }
@@ -248,6 +268,7 @@ async function syncSettings() {
     const r = data[0];
     if (!store.settings._dirty && ms(r.updated_at) >= ms(store.settings.updated_at)) {
       Object.assign(store.settings, { daily_cap: r.daily_cap, density: r.density, guidance: r.guidance || '', updated_at: isoNorm(r.updated_at), _dirty: false });
+      if (Array.isArray(r.folders)) store.settings.folders = r.folders.filter(f => f && f.id);
     }
     store.lastSync.user_settings = r.server_ts;
   }
@@ -263,6 +284,7 @@ async function syncNow() {
   store.owner = user.id;
   syncing = true; setSync('busy', 'Syncing…');
   try {
+    if (folderCols !== true) await probeFolderCols();
     await pushTable('notes', store.notes);
     await pushTable('cards', store.cards);
     await syncSettings();
@@ -314,29 +336,22 @@ const I = {
   plus: svg('<path d="M12 6v12M6 12h12"/>'),
   bolt: svg('<path d="M13 3 5.5 13.2h6L11 21l7.5-10.2h-6z"/>'),
   star: svg('<path d="m12 4 2.4 5 5.4.6-4 3.7 1.1 5.3L12 16l-4.8 2.6 1.1-5.3-4-3.7 5.4-.6z"/>'),
+  folder: svg('<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h4l2 2.2h7a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/>'),
+  folderPlus: svg('<path d="M3.5 7.5A2 2 0 0 1 5.5 5.5h4l2 2.2h7a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 11.2v5.6M9.2 14h5.6"/>'),
+  sort: svg('<path d="M7 19V5M7 5 3.8 8.2M7 5l3.2 3.2M13.5 7h7M13.5 12h5M13.5 17h3"/>'),
+  collapse: svg('<path d="m7.5 4 4.5 4.5L16.5 4M7.5 20l4.5-4.5 4.5 4.5"/>'),
+  sidebar: svg('<rect x="3.5" y="4.5" width="17" height="15" rx="3"/><path d="M9.5 4.5v15"/>'),
+  more: svg('<circle cx="6" cy="12" r=".9" fill="currentColor"/><circle cx="12" cy="12" r=".9" fill="currentColor"/><circle cx="18" cy="12" r=".9" fill="currentColor"/>'),
+  book: svg('<path d="M12 6.5c-1.6-1.3-4-2-7.5-2v13c3.5 0 5.9.7 7.5 2 1.6-1.3 4-2 7.5-2v-13c-3.5 0-5.9.7-7.5 2z"/><path d="M12 6.5v13"/>'),
+  pencil: svg('<path d="M15.8 4.7a2.1 2.1 0 0 1 3 3L8.5 18l-4 1 1-4z"/>'),
+  tray: svg('<path d="M4 13.5 6.3 6h11.4l2.3 7.5V18a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 18z"/><path d="M4 13.5h4.5l1 2h5l1-2H20"/>'),
   eyeSlash: svg('<path d="M3.5 3.5l17 17"/><path d="M10 6.3A9.5 9.5 0 0 1 12 6c5 0 8.5 4.3 9.3 6-.4.8-1.4 2.3-3 3.6M6.5 7.7C4.6 9 3.2 11 2.7 12c.8 1.7 4.3 6 9.3 6 1.6 0 3-.4 4.2-1"/><path d="M9.9 10a3 3 0 0 0 4.1 4.1"/>')
 };
 const ICON_NAV = { notes: I.doc, review: I.cards, settings: I.gear };
 
 /* ───────────── formatting ───────────── */
-function fmtListTime(iso) {
-  const d = new Date(iso), k = dateKey(d), diff = daysBetween(k, today());
-  if (diff === 0) return d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-  if (diff === 1) return 'Yesterday';
-  if (diff < 7) return d.toLocaleDateString([], { weekday: 'long' });
-  return d.toLocaleDateString([], { day: 'numeric', month: 'short', year: d.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
-}
-function groupLabel(iso) {
-  const d = new Date(iso), diff = daysBetween(dateKey(d), today());
-  if (diff <= 0) return 'Today';
-  if (diff === 1) return 'Yesterday';
-  if (diff < 7) return 'Previous 7 days';
-  if (diff < 30) return 'Previous 30 days';
-  return d.toLocaleDateString([], { month: 'long', year: 'numeric' });
-}
 const fmtLongDate = iso => new Date(iso).toLocaleString([], { day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit' });
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-const snippet = s => s.replace(/^#+\s.*$/m, '').replace(/[#*_`>\[\]|]/g, ' ').replace(/^\s*[-+]\s+/gm, '').replace(/\s+/g, ' ').trim();
 
 /* ───────────── theme ───────────── */
 function applyTheme() {
@@ -380,37 +395,318 @@ function refreshAfterSync() {
   else if (ui.view === 'settings') renderSettings();
 }
 
-/* ───────────── notes: list ───────────── */
+/* ───────────── library: folders and the tree (same behaviour as margin) ───────────── */
+// Folders nest to any depth. They're one small list in settings (synced as user_settings.folders);
+// a note's folder is note.folder_id. Deleting a folder never deletes notes: its contents move up one level.
+const cmpName = (a, b) => String(a || '').localeCompare(String(b || ''), undefined, { numeric: true, sensitivity: 'base' });
+function folders() { if (!Array.isArray(store.settings.folders)) store.settings.folders = []; return store.settings.folders; }
+const folderById = id => (id ? folders().find(f => f.id === id) || null : null);
+const parentOf = f => (f && f.parent && folderById(f.parent) ? f.parent : null);
+const foldersAt = p => folders().filter(f => (parentOf(f) || null) === (p || null)).sort((a, b) => cmpName(a.name || '￿', b.name || '￿'));
+const folderOf = n => (n && n.folder_id && folderById(n.folder_id) ? n.folder_id : null);
+const folderName = f => (f && f.name) || 'Untitled folder';
+function inFolder(id, anc) { for (let i = 0; id && i < 60; i++) { if (id === anc) return true; id = parentOf(folderById(id)); } return false; }
+function pathOf(fid) { const out = []; for (let i = 0; fid && i < 60; i++) { const f = folderById(fid); if (!f) break; out.unshift(folderName(f)); fid = parentOf(f); } return out; }
+const saveFolders = () => touch(store.settings);
+function createFolder(parent) {
+  const f = { id: 'f' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: '', parent: folderById(parent) ? parent : null, created_at: nowISO() };
+  folders().push(f); saveFolders(); return f.id;
+}
+function patchFolder(id, p) { const f = folderById(id); if (f) { Object.assign(f, p); saveFolders(); } }
+function moveNote(n, fid) { if ((n.folder_id || null) === (fid || null)) return; n.folder_id = fid || null; touch(n); }
+function moveFolder(id, parent) {
+  const f = folderById(id); if (!f) return false;
+  if (parent && (!folderById(parent) || inFolder(parent, id))) return false; // not into itself or its own subfolders
+  f.parent = parent || null; saveFolders(); return true;
+}
+function deleteFolder(id) {
+  const f = folderById(id); if (!f) return;
+  const up = parentOf(f);
+  liveNotes().forEach(n => { if (n.folder_id === id) moveNote(n, up); });
+  folders().forEach(c => { if (c.parent === id) c.parent = up; });
+  store.settings.folders = folders().filter(x => x.id !== id);
+  TR.open.delete(id); if (TR.sel === id) TR.sel = up; saveOpen(); saveFolders();
+}
+
+const TR = { open: new Set(loadJSON('recall.open', [])), sel: null, renaming: null, drag: null, dropEl: null };
+let sortBy = loadJSON('recall.sort', 'name') === 'recent' ? 'recent' : 'name';
+const saveLocal = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } };
+const saveOpen = () => saveLocal('recall.open', [...TR.open]);
+function revealNote(n) {
+  let f = folderOf(n), changed = false;
+  for (let i = 0; f && i < 60; i++) { if (!TR.open.has(f)) { TR.open.add(f); changed = true; } f = parentOf(folderById(f)); }
+  if (changed) saveOpen();
+}
+
 function renderList() {
-  const q = ui.search.trim().toLowerCase();
-  const all = liveNotes();
-  const notes = all
-    .filter(n => !q || n.title.toLowerCase().includes(q) || n.body.toLowerCase().includes(q))
-    .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  $('#view-notes').classList.toggle('show-editor', !!ui.noteId);
-  $('#list-foot').textContent = all.length ? plural(all.length, 'note') : '';
   const box = $('#note-list');
-  if (!notes.length) {
-    box.innerHTML = q
-      ? `<div class="list-empty"><p>No results for “${esc(ui.search.trim())}”</p></div>`
-      : `<div class="list-empty"><p>No notes yet</p><span>Write one, or import Markdown and text files.</span>
-           <div class="list-empty-actions"><button class="btn btn-primary" data-empty="new">New note</button><button class="btn btn-plain" data-empty="import">Import files</button></div></div>`;
-    $$('[data-empty]', box).forEach(b => b.onclick = e => { e.stopPropagation(); b.dataset.empty === 'new' ? createNote() : openAddModal(); });
+  $('#view-notes').classList.toggle('show-editor', !!ui.noteId);
+  if (TR.renaming && document.activeElement && document.activeElement.classList.contains('trename')) return;
+  const all = liveNotes();
+  $('#list-foot').textContent = all.length || folders().length ? `${plural(all.length, 'note')}, ${plural(folders().length, 'folder')}` : '';
+  const sb_ = $('#tb-sort'); if (sb_) { sb_.title = sortBy === 'recent' ? 'Sorted by recent. Click to sort by name' : 'Sorted by name. Click to sort by recent'; sb_.setAttribute('aria-label', sb_.title); }
+  const keep = box.scrollTop;
+  const q = ui.search.trim().toLowerCase();
+  const qCount = n => cardsOf(n.id).filter(x => x.status === 'active').length;
+
+  if (q) {
+    const hits = all.filter(n => n.title.toLowerCase().includes(q) || n.body.toLowerCase().includes(q)).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    box.innerHTML = hits.length ? hits.map(n => `<div class="trow note result${n.id === ui.noteId ? ' active' : ''}" data-k="n" data-id="${n.id}" style="--d:0">
+        <div class="tmain" role="treeitem" tabindex="0"><span class="tico">${I.doc}</span><span class="tname">${esc(n.title.trim() || 'New note')}</span>
+        <span class="tpath">${esc(pathOf(folderOf(n)).join(' › '))}</span></div></div>`).join('')
+      : `<div class="list-empty"><p>No results for “${esc(ui.search.trim())}”</p></div>`;
     return;
   }
-  let html = '', group = null;
-  for (const n of notes) {
-    const g = groupLabel(n.updated_at);
-    if (g !== group) { if (group !== null) html += '</div>'; html += `<h2 class="group-label">${esc(g)}</h2><div class="note-group">`; group = g; }
-    const c = cardsOf(n.id).filter(x => x.status === 'active').length;
-    const snip = snippet(n.body) || 'No additional text';
-    html += `<button class="note-row${n.id === ui.noteId ? ' active' : ''}" data-id="${n.id}">
-      <span class="nr-title">${esc(n.title.trim() || 'New note')}</span>
-      <span class="nr-sub"><time>${esc(fmtListTime(n.updated_at))}</time><span class="nr-snip">${esc(snip)}</span></span>
-      ${c ? `<span class="nr-count" title="${plural(c, 'question')} in review">${I.cards}${c}</span>` : ''}
-    </button>`;
+  if (!all.length && !folders().length) {
+    box.innerHTML = `<div class="list-empty"><p>No notes yet</p><span>Start one with the pencil below, or add a folder to keep notes organised.</span></div>`;
+    return;
   }
-  box.innerHTML = html + '</div>';
+  const byFolder = new Map();
+  for (const n of all) { const k = folderOf(n) || ''; if (!byFolder.has(k)) byFolder.set(k, []); byFolder.get(k).push(n); }
+  const cmp = sortBy === 'recent' ? (a, b) => b.updated_at.localeCompare(a.updated_at) : (a, b) => cmpName(a.title || 'New note', b.title || 'New note');
+  byFolder.forEach(arr => arr.sort(cmp));
+  const total = new Map(); // notes inside a folder, counting subfolders
+  const countIn = fid => { if (total.has(fid)) return total.get(fid); let c = (byFolder.get(fid) || []).length; foldersAt(fid).forEach(f => { c += countIn(f.id); }); total.set(fid, c); return c; };
+
+  let html = '';
+  (function fill(fid, depth) {
+    if (depth > 30) return;
+    for (const f of foldersAt(fid)) {
+      const open = TR.open.has(f.id), c = countIn(f.id);
+      html += `<div class="trow folder${TR.sel === f.id ? ' sel' : ''}" draggable="${TR.renaming === f.id ? 'false' : 'true'}" data-k="f" data-id="${f.id}" style="--d:${depth}">
+        <div class="tmain" role="treeitem" tabindex="0" aria-expanded="${open}" aria-level="${depth + 1}">
+          <span class="tchev${open ? ' open' : ''}">${I.chevron}</span><span class="tico">${I.folder}</span>
+          ${TR.renaming === f.id ? `<input class="trename" maxlength="80" value="${esc(f.name || '')}" placeholder="Folder name" aria-label="Folder name">` : `<span class="tname">${esc(folderName(f))}</span>`}
+          ${c ? `<span class="tcount">${c}</span>` : ''}
+        </div>
+        <button class="tmore" type="button" aria-label="Folder options" title="Options">${I.more}</button>
+      </div>`;
+      if (open) {
+        html += `<div class="tkids" role="group" data-owner="${f.id}" style="--d:${depth}">`;
+        const before = html.length;
+        fill(f.id, depth + 1);
+        if (html.length === before) html += `<p class="tempty" style="--d:${depth + 1}">Empty</p>`;
+        html += '</div>';
+      }
+    }
+    for (const n of byFolder.get(fid || '') || []) {
+      const c = qCount(n);
+      html += `<div class="trow note${n.id === ui.noteId ? ' active' : ''}" draggable="true" data-k="n" data-id="${n.id}" data-f="${folderOf(n) || ''}" style="--d:${depth}">
+        <div class="tmain" role="treeitem" tabindex="0" aria-level="${depth + 1}">
+          <span class="tchev"></span><span class="tico">${I.doc}</span><span class="tname">${esc(n.title.trim() || 'New note')}</span>
+          ${c ? `<span class="tq" title="${plural(c, 'question')} in review">${I.cards}${c}</span>` : ''}
+        </div>
+        <button class="tmore" type="button" aria-label="Note options" title="Options">${I.more}</button>
+      </div>`;
+    }
+  })(null, 0);
+  box.innerHTML = html;
+  box.scrollTop = keep;
+  wireRename();
+}
+function wireRename() {
+  const inp = $('#note-list .trename'); if (!inp) return;
+  const id = inp.closest('.trow').dataset.id; let done = false;
+  const finish = save => { if (done) return; done = true; TR.renaming = null; if (save) patchFolder(id, { name: inp.value.trim() }); renderList(); refreshFolderChip(); };
+  inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); finish(true); } else if (e.key === 'Escape') { e.preventDefault(); finish(false); } };
+  inp.onblur = () => finish(true);
+  inp.onclick = e => e.stopPropagation();
+  inp.focus(); inp.select(); // right away, so fast typing after "New folder" lands in the name
+  setTimeout(() => { if (!done && inp.isConnected && document.activeElement !== inp) { inp.focus(); inp.select(); } }, 0);
+}
+function focusRow(id) { const m = $(`#note-list .trow[data-id="${id}"] .tmain`); if (m) m.focus({ preventScroll: false }); }
+function toggleFolder(id) {
+  TR.sel = id;
+  if (TR.open.has(id)) TR.open.delete(id); else TR.open.add(id);
+  saveOpen(); renderList(); focusRow(id);
+}
+function openNote(id) {
+  const n = store.notes[id]; if (!n) return;
+  revealNote(n); ui.noteId = id; render();
+}
+function deleteNote(n) {
+  if (!confirm(`Delete “${n.title || 'New note'}” and its questions?`)) return;
+  n.deleted = true; touch(n);
+  cardsOf(n.id).forEach(c => { c.deleted = true; touch(c); });
+  if (ui.noteId === n.id) ui.noteId = null;
+  render(); toast('Note deleted');
+}
+function newNoteIn(fid) {
+  const n = newNote('', '', fid);
+  if (fid) { TR.open.add(fid); saveOpen(); }
+  ui.noteId = n.id; ui.search = ''; $('#search').value = ''; ui.mode = 'edit';
+  setView('notes');
+  const t = $('#ed-title'); if (t) t.focus();
+  return n;
+}
+function newFolder(parent) {
+  const id = createFolder(parent || null);
+  if (parent) { TR.open.add(parent); saveOpen(); }
+  TR.sel = id; TR.renaming = id; ui.search = ''; $('#search').value = '';
+  if (isNarrow()) ui.noteId = null; // phones: stay on the list to name it
+  if (ui.view !== 'notes') setView('notes'); else renderList();
+}
+
+/* row menus: a context menu on laptops, an action sheet on phones */
+function folderMenu(f, at) {
+  if (!f) return;
+  openMenu(folderName(f), [
+    { label: 'New note here', icon: I.compose, fn: () => newNoteIn(f.id) },
+    { label: 'New folder here', icon: I.folderPlus, fn: () => newFolder(f.id) },
+    { label: 'Rename', icon: I.pencil, fn: () => { TR.sel = f.id; TR.renaming = f.id; renderList(); } },
+    { label: 'Move to…', icon: I.folder, fn: () => pickFolderParent(f) },
+    'sep',
+    { label: 'Delete folder', icon: I.trash, danger: true, fn: () => openMenu(`Delete “${folderName(f)}”?`, [
+      { label: 'Delete the folder only', icon: I.trash, danger: true, fn: () => { deleteFolder(f.id); renderList(); refreshFolderChip(); toast('Folder deleted. Its contents moved up a level.'); } },
+      { label: 'Cancel', fn: () => {} }
+    ], at, 'Nothing inside is deleted. Its notes and folders move up one level.') }
+  ], at);
+}
+function noteMenu(n, at) {
+  if (!n) return;
+  openMenu(n.title.trim() || 'New note', [
+    { label: 'Open', icon: I.doc, fn: () => openNote(n.id) },
+    { label: 'Move to…', icon: I.folder, fn: () => pickNoteFolder(n) },
+    'sep',
+    { label: 'Delete note', icon: I.trash, danger: true, fn: () => deleteNote(n) }
+  ], at);
+}
+let menuItems = [];
+function openMenu(title, items, at, note) {
+  const layer = $('#menu-layer');
+  menuItems = items;
+  layer.innerHTML = `<div class="menu${note ? ' has-note' : ''}" role="menu" aria-label="${esc(title)}">
+    <div class="menu-head"><strong>${esc(title)}</strong>${note ? `<span>${esc(note)}</span>` : ''}</div>
+    <div class="menu-items">${items.map((it, i) => it === 'sep' ? '<div class="menu-sep" role="separator"></div>'
+      : `<button class="menu-item${it.danger ? ' danger' : ''}" role="menuitem" data-i="${i}">${it.icon || '<span class="ico"></span>'}<span>${esc(it.label)}</span></button>`).join('')}</div>
+    <button class="menu-cancel" type="button">Cancel</button>
+  </div>`;
+  layer.hidden = false;
+  const menu = $('.menu', layer);
+  if (!isNarrow() && at) {
+    const w = menu.offsetWidth, h = menu.offsetHeight;
+    menu.style.left = Math.max(8, Math.min(at.x, innerWidth - w - 8)) + 'px';
+    menu.style.top = (at.y + h > innerHeight - 8 ? Math.max(8, at.y - h) : at.y) + 'px';
+  }
+  requestAnimationFrame(() => layer.classList.add('open'));
+  const first = $('.menu-item', menu); if (first && !isNarrow()) first.focus();
+}
+function closeMenu() { const l = $('#menu-layer'); l.classList.remove('open'); l.hidden = true; l.innerHTML = ''; menuItems = []; }
+function wireMenu() {
+  const layer = $('#menu-layer');
+  layer.addEventListener('click', e => {
+    const b = e.target.closest('.menu-item');
+    if (b) { const it = menuItems[+b.dataset.i]; closeMenu(); if (it && it.fn) it.fn(); return; }
+    if (e.target.closest('.menu-cancel') || !e.target.closest('.menu')) closeMenu();
+  });
+  layer.addEventListener('contextmenu', e => { e.preventDefault(); closeMenu(); });
+  layer.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeMenu(); return; }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const btns = $$('.menu-item', layer), i = btns.indexOf(document.activeElement);
+    btns[(i + (e.key === 'ArrowDown' ? 1 : btns.length - 1)) % btns.length]?.focus();
+  });
+  window.addEventListener('resize', () => { if (!layer.hidden) closeMenu(); });
+}
+
+/* Move to… */
+function folderRowsFor({ currentId, none, exclude }) {
+  const rows = [{ id: '', label: none, depth: 0, current: !currentId }];
+  (function walk(p, d) {
+    if (d > 30) return;
+    for (const f of foldersAt(p)) { if (f.id === exclude) continue; rows.push({ id: f.id, label: folderName(f), depth: d + 1, current: currentId === f.id }); walk(f.id, d + 1); }
+  })(null, 0);
+  return rows;
+}
+function openPick(title, rows, onPick) {
+  openSheet(`<header class="sheet-head"><button class="text-btn" id="pk-cancel">Cancel</button><h3>${esc(title)}</h3><span class="sheet-head-spacer"></span></header>
+    <div class="pick-list">${rows.map((r, i) => `<button class="pick-row${r.current ? ' current' : ''}" data-i="${i}" style="--d:${r.depth}">${r.id ? I.folder : I.tray}<span>${esc(r.label)}</span>${r.current ? I.check : ''}</button>`).join('')}</div>`, m => {
+    $('#pk-cancel').onclick = closeModal;
+    $$('.pick-row', m).forEach(b => b.onclick = () => { closeModal(); onPick(rows[+b.dataset.i].id); });
+  });
+}
+function pickNoteFolder(n) {
+  openPick('Move note to', folderRowsFor({ currentId: folderOf(n), none: 'No folder' }), id => {
+    moveNote(n, id); if (id) { TR.open.add(id); saveOpen(); }
+    renderList(); refreshFolderChip();
+    toast(id ? 'Moved to ' + folderName(folderById(id)) : 'Moved out of its folder');
+  });
+}
+function pickFolderParent(f) {
+  openPick('Move folder to', folderRowsFor({ currentId: parentOf(f), none: 'Top level', exclude: f.id }), id => {
+    if (moveFolder(f.id, id)) { if (id) { TR.open.add(id); saveOpen(); } renderList(); refreshFolderChip(); }
+    else toast('A folder can’t go inside itself.');
+  });
+}
+
+/* drag and drop (laptops and iPad; phones use Move to…) */
+function dropTarget(e) {
+  const row = e.target.closest && e.target.closest('.trow'), kids = e.target.closest && e.target.closest('.tkids');
+  if (row && row.dataset.k === 'f') return { el: row, fid: row.dataset.id };
+  if (row && row.dataset.k === 'n') return { el: row.dataset.f ? row.closest('.tkids') : null, fid: row.dataset.f || '' };
+  if (kids) return { el: kids, fid: kids.dataset.owner };
+  return { el: null, fid: '' };
+}
+function dropOk(fid) {
+  const d = TR.drag; if (!d) return false;
+  if (d.k === 'f') return !(fid && inFolder(fid, d.id)) && (parentOf(folderById(d.id)) || '') !== fid;
+  const n = store.notes[d.id]; return !!n && (folderOf(n) || '') !== fid;
+}
+function clearDrop() { if (TR.dropEl) { TR.dropEl.classList.remove('drop'); TR.dropEl = null; } $('#note-list').classList.remove('drop-root'); }
+function wireTree() {
+  const tree = $('#note-list');
+  tree.addEventListener('click', e => {
+    const row = e.target.closest('.trow');
+    if (!row) { if (!e.target.closest('.list-empty')) { TR.sel = null; renderList(); } return; }
+    const more = e.target.closest('.tmore');
+    if (more) { const r = more.getBoundingClientRect(); return rowMenu(row, { x: r.left, y: r.bottom + 4 }); }
+    if (row.dataset.k === 'f') { if (TR.renaming !== row.dataset.id) toggleFolder(row.dataset.id); }
+    else openNote(row.dataset.id);
+  });
+  tree.addEventListener('contextmenu', e => { const row = e.target.closest('.trow'); if (!row || row.classList.contains('result')) return; e.preventDefault(); rowMenu(row, { x: e.clientX, y: e.clientY }); });
+  tree.addEventListener('keydown', e => {
+    const main = e.target.closest('.tmain'); if (!main || e.target !== main) return;
+    const row = main.closest('.trow');
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); main.click(); }
+    else if (row.dataset.k === 'f' && (e.key === 'ArrowRight' || e.key === 'ArrowLeft') && TR.open.has(row.dataset.id) !== (e.key === 'ArrowRight')) { e.preventDefault(); toggleFolder(row.dataset.id); }
+    else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault(); const all = $$('#note-list .tmain'), i = all.indexOf(main);
+      all[Math.max(0, Math.min(all.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]?.focus();
+    } else if (e.key === 'F2' && row.dataset.k === 'f') { e.preventDefault(); TR.renaming = row.dataset.id; renderList(); }
+  });
+  tree.addEventListener('dragstart', e => {
+    const row = e.target.closest && e.target.closest('.trow'); if (!row || row.classList.contains('result')) return;
+    TR.drag = { k: row.dataset.k, id: row.dataset.id };
+    try { e.dataTransfer.setData('application/x-recall', row.dataset.id); e.dataTransfer.effectAllowed = 'move'; } catch { /* old browsers */ }
+    row.classList.add('dragging');
+  });
+  tree.addEventListener('dragend', () => { TR.drag = null; clearDrop(); $$('.trow.dragging').forEach(r => r.classList.remove('dragging')); });
+  tree.addEventListener('dragover', e => {
+    if (!TR.drag) return;
+    const t = dropTarget(e);
+    if (!dropOk(t.fid)) { clearDrop(); return; }
+    e.preventDefault(); try { e.dataTransfer.dropEffect = 'move'; } catch { /* ignore */ }
+    if (t.el !== TR.dropEl || (!t.el && !tree.classList.contains('drop-root'))) { clearDrop(); if (t.el) { t.el.classList.add('drop'); TR.dropEl = t.el; } else tree.classList.add('drop-root'); }
+  });
+  tree.addEventListener('drop', e => {
+    if (!TR.drag) return;
+    e.preventDefault(); e.stopPropagation();
+    const t = dropTarget(e), d = TR.drag, ok = dropOk(t.fid);
+    TR.drag = null; clearDrop();
+    if (!ok) return;
+    if (d.k === 'f') { if (!moveFolder(d.id, t.fid || null)) return; }
+    else moveNote(store.notes[d.id], t.fid);
+    if (t.fid) { TR.open.add(t.fid); saveOpen(); }
+    renderList(); refreshFolderChip();
+  });
+}
+function rowMenu(row, at) { row.dataset.k === 'f' ? folderMenu(folderById(row.dataset.id), at) : noteMenu(store.notes[row.dataset.id], at); }
+
+/* the library panel: hideable on laptops; on phones it is the Notes screen */
+function setSide(open, persist = true) {
+  document.body.classList.toggle('side-hidden', !open);
+  if (persist) saveLocal('recall.side', !!open);
 }
 
 /* ───────────── notes: editor ───────────── */
@@ -441,18 +737,18 @@ function renderEditor() {
   const st = noteState(n);
   pane.innerHTML = `
     <header class="ed-bar">
-      <button class="icon-btn back" id="ed-back" aria-label="Back to notes">${I.back}<span>Notes</span></button>
-      <div class="seg" id="ed-mode" role="tablist">
-        <button data-m="edit">Write</button><button data-m="split" class="wide-only">Split</button><button data-m="preview">Read</button>
-      </div>
+      <button class="icon-btn back" id="ed-back" aria-label="Back to library">${I.back}<span>Library</span></button>
+      <button class="icon-btn side-show" id="ed-side" aria-label="Show library" title="Show library">${I.sidebar}</button>
+      <button class="folder-chip" id="ed-folder" title="Move to another folder">${folderChipHTML(n)}</button>
       <div class="ed-bar-end">
+        <button class="icon-btn read-toggle" id="ed-read" aria-pressed="false">${I.book}</button>
         <button class="pill pill-${st.kind}" id="ed-queue">${st.kind === 'done' ? I.check : I.sparkle}<span>${st.label}</span></button>
         <button class="icon-btn" id="ed-del" aria-label="Delete note" title="Delete note">${I.trash}</button>
       </div>
     </header>
     <div class="ed-scroll" id="ed-scroll">
       <article class="ed-doc">
-        <time class="ed-date">${esc(fmtLongDate(n.updated_at))}</time>
+        <p class="ed-meta"><button class="ed-where" id="ed-where" title="Move to another folder">${folderChipHTML(n)}</button><time class="ed-date">${esc(fmtLongDate(n.updated_at))}</time></p>
         <input id="ed-title" class="ed-title" value="${esc(n.title)}" placeholder="Title" aria-label="Title">
         <p class="ed-status ed-status-${st.kind}" id="ed-status">${esc(st.text)}</p>
         <div class="ed-body" id="ed-body">
@@ -472,14 +768,12 @@ function renderEditor() {
   $('#ed-title').oninput = e => { n.title = e.target.value; touch(n); renderList(); refreshStatus(); };
   $('#ed-title').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); $('#ed-text').focus(); } };
   $('#ed-text').oninput = e => { n.body = e.target.value; touch(n); updatePreview(); refreshStatus(); autoGrow(); };
-  $('#ed-mode').onclick = e => { const m = e.target.closest('button')?.dataset.m; if (m) { ui.mode = m; paintMode(); updatePreview(); autoGrow(); } };
+  $('#ed-read').onclick = () => { ui.mode = ui.mode === 'preview' ? 'edit' : 'preview'; paintMode(); updatePreview(); autoGrow(); if (ui.mode === 'edit') $('#ed-text').focus(); };
+  $('#ed-side').onclick = () => { setSide(true); renderList(); };
+  $('#ed-folder').onclick = $('#ed-where').onclick = () => pickNoteFolder(n);
+  $('#ed-preview').ondblclick = () => { ui.mode = 'edit'; paintMode(); autoGrow(); $('#ed-text').focus(); };
   $('#ed-queue').onclick = () => queueNote(n);
-  $('#ed-del').onclick = () => {
-    if (!confirm(`Delete “${n.title || 'New note'}” and its questions?`)) return;
-    n.deleted = true; touch(n);
-    cardsOf(n.id).forEach(c => { c.deleted = true; touch(c); });
-    ui.noteId = null; render(); toast('Note deleted');
-  };
+  $('#ed-del').onclick = () => deleteNote(n);
   $('#ed-preview').onclick = e => {
     const a = e.target.closest('.wikilink'); if (!a) return;
     e.preventDefault(); openByTitle(a.dataset.link);
@@ -521,9 +815,18 @@ function autoGrow() {
 }
 function paintMode() {
   const b = $('#ed-body'); if (!b) return;
-  if (ui.mode === 'split' && isNarrow()) ui.mode = 'edit';
+  if (ui.mode !== 'preview') ui.mode = 'edit';
   b.dataset.mode = ui.mode;
-  $$('#ed-mode button').forEach(x => x.classList.toggle('on', x.dataset.m === ui.mode));
+  const r = $('#ed-read'), reading = ui.mode === 'preview';
+  if (r) { r.setAttribute('aria-pressed', String(reading)); r.title = reading ? 'Back to writing' : 'Read view'; r.setAttribute('aria-label', r.title); }
+}
+function folderChipHTML(n) {
+  const p = pathOf(folderOf(n));
+  return `${p.length ? I.folder : I.tray}<span>${esc(p.length ? p[p.length - 1] : 'No folder')}</span>`;
+}
+function refreshFolderChip() {
+  const n = store.notes[ui.noteId]; if (!n) return;
+  ['#ed-folder', '#ed-where'].forEach(sel => { const b = $(sel); if (b) { b.innerHTML = folderChipHTML(n); b.title = (pathOf(folderOf(n)).join(' › ') || 'No folder') + ' · Move to another folder'; } });
 }
 function updatePreview() {
   const n = store.notes[ui.noteId], p = $('#ed-preview');
@@ -568,16 +871,15 @@ function renderExtras() {
   };
 }
 
-function createNote() {
-  const n = newNote('', '');
-  ui.noteId = n.id; ui.search = ''; $('#search').value = '';
-  setView('notes');
-  const t = $('#ed-title'); if (t) t.focus();
+function createNote() { // new notes go into the folder you last tapped, like margin
+  const f = folderById(TR.sel);
+  newNoteIn(f ? f.id : null);
+  if (f) toast('New note in ' + folderName(f));
 }
 function openByTitle(title) {
   let n = findNoteByTitle(title);
-  if (!n) n = newNote(title, '');
-  ui.noteId = n.id; render();
+  if (!n) n = newNote(title, '', folderOf(store.notes[ui.noteId]));
+  openNote(n.id);
 }
 
 async function queueNote(n, { quiet = false } = {}) {
@@ -649,7 +951,9 @@ async function readFiles(files) {
 async function ingest(items) {
   if (!items.length) return;
   let last = null;
-  const made = items.map(it => { const n = newNote(it.title || 'New note', it.body); last = n; return n; });
+  const fid = folderById(TR.sel) ? TR.sel : null; // imports land in the folder you last tapped
+  if (fid) { TR.open.add(fid); saveOpen(); }
+  const made = items.map(it => { const n = newNote(it.title || 'New note', it.body, fid); last = n; return n; });
   ui.noteId = made.length === 1 ? last.id : null; setView('notes');
   if (!user) { toast('Saved. Sign in from Settings to turn notes into questions.', 5000); return; }
   let i = 0;
@@ -977,11 +1281,14 @@ function openAuthModal() {
 /* ───────────── init ───────────── */
 function wire() {
   $$('#nav .tab').forEach(b => { b.insertAdjacentHTML('afterbegin', ICON_NAV[b.dataset.view]); b.onclick = () => { if (b.dataset.view === 'review' && ui.view === 'review' && session) return; setView(b.dataset.view); }; });
-  $('#btn-new').innerHTML = I.compose; $('#btn-add').innerHTML = I.upload; $('#search-ico').innerHTML = I.search;
-  $('#btn-new').onclick = createNote;
-  $('#btn-add').onclick = openAddModal;
+  $('#search-ico').innerHTML = I.search;
+  const tools = { 'tb-note': [I.compose, createNote], 'tb-folder': [I.folderPlus, () => newFolder(folderById(TR.sel) ? TR.sel : null)], 'tb-import': [I.upload, openAddModal],
+    'tb-sort': [I.sort, () => { sortBy = sortBy === 'name' ? 'recent' : 'name'; saveLocal('recall.sort', sortBy); renderList(); toast(sortBy === 'recent' ? 'Notes: recent first' : 'Notes: by name'); }],
+    'tb-collapse': [I.collapse, () => { TR.open.clear(); TR.sel = null; saveOpen(); renderList(); }],
+    'side-hide': [I.sidebar, () => setSide(false)] };
+  Object.entries(tools).forEach(([id, [icon, fn]]) => { const b = $('#' + id); b.innerHTML = icon; b.onclick = fn; });
   $('#search').oninput = e => { ui.search = e.target.value; renderList(); };
-  $('#note-list').onclick = e => { const r = e.target.closest('.note-row'); if (r) { ui.noteId = r.dataset.id; render(); } };
+  wireTree(); wireMenu();
   $('#file-input').onchange = async e => { const items = await readFiles([...e.target.files]); e.target.value = ''; await ingest(items); };
 
   let drag = 0;
@@ -1018,13 +1325,14 @@ function healReviewMarks() {
 async function init() {
   healReviewMarks();
   applyTheme();
+  setSide(loadJSON('recall.side', true) !== false, false);
   wire();
-  if (!isNarrow()) { const first = liveNotes().sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0]; if (first) ui.noteId = first.id; }
+  if (!isNarrow()) { const first = liveNotes().sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0]; if (first) { ui.noteId = first.id; revealNote(first); } }
   render();
   await initSupabase();
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
-window.Recall = { get store() { return store; }, config, syncNow, generateCards, buildQueue, aheadQueue, applySRS, startSession, commitReview, newNote, renderMD, ui, setView, get session() { return session; }, _setStore: s => { store = s; } };
+window.Recall = { get store() { return store; }, config, syncNow, folders, createFolder, moveFolder, moveNote, deleteFolder, folderOf, pathOf, newNoteIn, TR, generateCards, buildQueue, aheadQueue, applySRS, startSession, commitReview, newNote, renderMD, ui, setView, get session() { return session; }, _setStore: s => { store = s; } };
 init();
 })();

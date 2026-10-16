@@ -26,19 +26,25 @@
   </nav>
   <main>
     <section id="view-notes" class="view">
-      <aside id="sidebar">
+      <aside id="sidebar" aria-label="Library">
         <header class="list-head">
           <div class="list-title-row">
-            <h1 class="large-title">Notes</h1>
-            <div class="list-actions">
-              <button class="icon-btn" id="btn-add" title="Import or paste" aria-label="Import or paste"></button>
-              <button class="icon-btn accent" id="btn-new" title="New note" aria-label="New note"></button>
-            </div>
+            <h1 class="large-title">Library</h1>
+            <button class="icon-btn side-hide" id="side-hide" title="Hide library" aria-label="Hide library"></button>
           </div>
           <label class="search"><span id="search-ico" class="search-ico"></span><input id="search" type="search" placeholder="Search" autocomplete="off" aria-label="Search notes"></label>
         </header>
-        <div id="note-list" class="note-list"></div>
-        <footer class="list-foot" id="list-foot"></footer>
+        <div id="note-list" class="tree" role="tree" aria-label="Folders and notes"></div>
+        <footer class="side-foot">
+          <div class="side-tools">
+            <button class="tool" id="tb-note" title="New note" aria-label="New note"></button>
+            <button class="tool" id="tb-folder" title="New folder" aria-label="New folder"></button>
+            <button class="tool" id="tb-import" title="Import or paste" aria-label="Import or paste"></button>
+            <button class="tool" id="tb-sort" title="Sort" aria-label="Sort"></button>
+            <button class="tool" id="tb-collapse" title="Collapse all folders" aria-label="Collapse all folders"></button>
+          </div>
+          <p class="side-count" id="list-foot"></p>
+        </footer>
       </aside>
       <div id="editor-pane"></div>
     </section>
@@ -50,6 +56,7 @@
 <div id="dropzone" hidden><div>Drop to add notes</div></div>
 <div id="toast" role="status" aria-live="polite"></div>
 <div id="modal" hidden></div>
+<div id="menu-layer" hidden></div>
 <script src="/config.js"></script>
 <script src="vendor/marked.umd.js"></script>
 <script src="vendor/purify.min.js"></script>
