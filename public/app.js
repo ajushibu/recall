@@ -43,10 +43,9 @@ const defaultSettings = () => ({ daily_cap: 10, density: 'balanced', guidance: '
 
 let store = Object.assign({ notes: {}, cards: {}, settings: defaultSettings(), lastSync: {}, owner: null }, loadJSON(STORE_KEY, {}));
 store.settings = Object.assign(defaultSettings(), store.settings);
-let config = Object.assign({
-  supabaseUrl: '', supabaseKey: '', apiKey: '',
-  genModel: 'claude-sonnet-5-5', gradeModel: 'claude-haiku-5-5', theme: 'system'
-}, loadJSON(CONFIG_KEY, {}));
+// Public Supabase values come from /config.js (served from env vars, like margin). Only the theme is per-device.
+const CFG = window.RECALL_CONFIG || {};
+let config = Object.assign({ theme: 'system' }, loadJSON(CONFIG_KEY, {}));
 
 let persistTimer;
 function persist() {
@@ -78,60 +77,33 @@ function renderMD(src) {
   return window.DOMPurify.sanitize(html, { ADD_ATTR: ['data-link'] });
 }
 
-/* ───────────── Claude API ───────────── */
-async function callClaude({ model, system, user, maxTokens = 3000 }) {
-  if (!config.apiKey) throw new Error('Add your Claude API key in Settings first.');
+/* ───────────── server API (Claude runs on the server; key never reaches the browser) ───────────── */
+const API_ERRORS = {
+  signed_out: 'Sign in from Settings to generate questions.',
+  not_allowed: 'This account isn’t allowed to use Claude here. Check ALLOWED_EMAIL in Vercel.',
+  no_api_key: 'The server has no ANTHROPIC_API_KEY. Add it in Vercel and redeploy.',
+  no_supabase: 'The server is missing SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY.',
+  bad_api_key: 'Anthropic rejected the API key set in Vercel.',
+  billing: 'Your Anthropic account is out of credit.',
+  rate_limited: 'Claude is rate-limiting requests. Try again in a minute.',
+  overloaded: 'Claude is overloaded right now. Try again in a minute.',
+  bad_model: 'The model name set in Vercel doesn’t exist.'
+};
+async function api(path, payload) {
+  if (!sb) throw new Error('Sync isn’t configured on the server, so questions can’t be generated.');
+  let token = null;
+  try { const { data } = await sb.auth.getSession(); token = data.session?.access_token || null; } catch { /* offline */ }
+  if (!token) throw new Error(API_ERRORS.signed_out);
   let res;
   try {
-    res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-api-key': config.apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
-      },
-      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages: [{ role: 'user', content: user }] })
-    });
-  } catch (e) { throw new Error('Could not reach the Claude API (offline?).'); }
-  if (!res.ok) {
-    let msg = res.statusText;
-    try { const j = await res.json(); msg = j.error?.message || msg; } catch { /* ignore */ }
-    throw new Error(`Claude API ${res.status}: ${msg}`);
-  }
-  const j = await res.json();
-  return (j.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
-}
-function parseJSON(text) {
-  const a = text.indexOf('{'), b = text.lastIndexOf('}');
-  if (a < 0 || b < a) throw new Error('Model returned no JSON.');
-  return JSON.parse(text.slice(a, b + 1));
+    res = await fetch(path, { method: 'POST', headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token }, body: JSON.stringify(payload) });
+  } catch { throw new Error('You’re offline. Questions are generated when you’re back online.'); }
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(API_ERRORS[j.error] || `Claude couldn’t answer (${j.error || res.status}). Try again.`);
+  return j;
 }
 
 /* ───────────── question generation ───────────── */
-const GEN_SYSTEM = `You turn a learner's notes into a small set of review questions for spaced repetition.
-
-Your job is judgement, not coverage. Pick only the points the learner must retain for the concept to keep working in their head. Skip trivia, incidental examples, dates and names unless they are central. If the note has nothing worth retaining, return an empty list — that is a valid answer.
-
-Rules:
-- Prefer questions that test understanding (why, how, what differs, what happens if) over recall of phrasing.
-- Mix two types. "mcq": exactly 4 options, one correct, distractors built from plausible misconceptions; "answer" must be copied exactly from one option. "recall": the learner types an answer; "answer" is a concise model answer (1-3 sentences).
-- Use mcq for discriminating between similar ideas; use recall for explaining a mechanism or reasoning.
-- Every question must be self-contained: never say "according to the note" or refer to the note.
-- Base everything on the note. Do not add outside facts. Skip claims that are unclear or look wrong rather than quizzing on them.
-- importance: 5 = the rest of the note depends on it, 3 = solid supporting point, 1 = nice to know.
-- explanation: one or two sentences giving the reasoning or context shown after answering.
-
-Respond with ONLY a JSON object:
-{"cards":[{"type":"mcq"|"recall","question":"...","options":["..","..","..",".."],"answer":"...","explanation":"...","importance":1-5}]}
-Omit "options" for recall questions.`;
-
-const DENSITY = {
-  low: 'Ask very little: 1-3 questions in total, only the most central ideas.',
-  balanced: 'Roughly one question per 150-200 words of the note, between 2 and 6 in total. Only what is needed to keep the concept working in the learner\'s head.',
-  high: 'Be more thorough: up to 12 questions, including supporting details and connections between ideas, but still skip trivia.'
-};
-
 function normalizeCard(raw, noteId) {
   const q = String(raw?.question || '').trim();
   let ans = String(raw?.answer || '').trim();
@@ -160,23 +132,15 @@ async function generateCards(note, { force = false } = {}) {
   if (!force && note.gen_hash === h) return { added: 0, unchanged: true };
   if (wordCount(note.body) < 15) return { added: 0, tooShort: true };
 
-  const existing = cardsOf(note.id).map(c => c.question);
   const byRecent = f => Object.values(store.cards).filter(f).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
-  const trivial = byRecent(c => c.feedback === 'trivial').slice(0, 10).map(c => c.question);
-  const useful = byRecent(c => c.feedback === 'useful').slice(0, 6).map(c => c.question);
   const s = store.settings;
-
-  let user = `Density: ${DENSITY[s.density] || DENSITY.balanced}\n`;
-  if (s.guidance.trim()) user += `\nWhat the learner told us they want from their reviews:\n${s.guidance.trim()}\n`;
-  if (trivial.length) user += `\nThe learner marked these past questions as too trivial. Do not ask things like them:\n- ${trivial.join('\n- ')}\n`;
-  if (useful.length) user += `\nThe learner flagged these past questions as key. Questions of this kind are valued:\n- ${useful.join('\n- ')}\n`;
-  if (existing.length) user += `\nQuestions already generated for this note (do not repeat or rephrase them; only add questions for content they do not cover):\n- ${existing.join('\n- ')}\n`;
-  user += `\n--- NOTE TITLE ---\n${note.title}\n--- NOTE BODY ---\n${note.body.slice(0, 14000)}`;
-
-  const text = await callClaude({ model: config.genModel, system: GEN_SYSTEM, user, maxTokens: 3500 });
-  const parsed = parseJSON(text);
-  const raw = Array.isArray(parsed.cards) ? parsed.cards : [];
-  const made = raw.map(r => normalizeCard(r, note.id)).filter(Boolean);
+  const r = await api('/api/generate', {
+    title: note.title, body: note.body, density: s.density, guidance: s.guidance,
+    trivial: byRecent(c => c.feedback === 'trivial').slice(0, 10).map(c => c.question),
+    useful: byRecent(c => c.feedback === 'useful').slice(0, 6).map(c => c.question),
+    existing: cardsOf(note.id).map(c => c.question)
+  });
+  const made = (Array.isArray(r.cards) ? r.cards : []).map(x => normalizeCard(x, note.id)).filter(Boolean);
   made.forEach(c => { store.cards[c.id] = c; });
   note.gen_hash = h; note.gen_at = nowISO(); touch(note);
   persist(); scheduleSync();
@@ -184,17 +148,9 @@ async function generateCards(note, { force = false } = {}) {
 }
 
 /* ───────────── free-recall grading ───────────── */
-const GRADE_SYSTEM = `You grade a learner's typed answer against a reference answer.
-Judge the core idea, not wording: accept paraphrase, reject answers that miss or contradict the central point.
-Be candid and specific. No flattery, no padding. If the answer is partly right, say exactly what is missing or wrong.
-Respond with ONLY JSON: {"verdict":"correct"|"partial"|"wrong","feedback":"1-2 sentences"}`;
-
 async function gradeAnswer(card, answer) {
-  const user = `Question: ${card.question}\n\nReference answer: ${card.answer}\n\nLearner's answer: ${answer || '(blank)'}`;
-  const text = await callClaude({ model: config.gradeModel, system: GRADE_SYSTEM, user, maxTokens: 400 });
-  const j = parseJSON(text);
-  const v = ['correct', 'partial', 'wrong'].includes(j.verdict) ? j.verdict : 'wrong';
-  return { verdict: v, feedback: String(j.feedback || '') };
+  const j = await api('/api/grade', { question: card.question, reference: card.answer, answer });
+  return { verdict: ['correct', 'partial', 'wrong'].includes(j.verdict) ? j.verdict : 'wrong', feedback: String(j.feedback || '') };
 }
 
 /* ───────────── spaced repetition ───────────── */
@@ -322,9 +278,9 @@ async function syncNow() {
 
 async function initSupabase() {
   sb = null; user = null;
-  if (!config.supabaseUrl || !config.supabaseKey || !window.supabase) { setSync('off', 'Local only'); return; }
+  if (!CFG.supabaseUrl || !CFG.supabaseKey || !window.supabase) { setSync('off', 'Local only'); return; }
   try {
-    sb = window.supabase.createClient(config.supabaseUrl.trim(), config.supabaseKey.trim());
+    sb = window.supabase.createClient(CFG.supabaseUrl.trim(), CFG.supabaseKey.trim());
     const { data } = await sb.auth.getSession();
     user = data.session?.user || null;
     sb.auth.onAuthStateChange((_e, s) => {
@@ -693,7 +649,7 @@ async function ingest(items) {
   let last = null;
   const made = items.map(it => { const n = newNote(it.title || 'New note', it.body); last = n; return n; });
   ui.noteId = made.length === 1 ? last.id : null; setView('notes');
-  if (!config.apiKey) { toast('Saved. Add a Claude API key in Settings to generate questions.', 5000); return; }
+  if (!user) { toast('Saved. Sign in from Settings to turn notes into questions.', 5000); return; }
   let i = 0;
   for (const n of made) {
     i++;
@@ -869,7 +825,7 @@ function renderCard() {
     $('#rv-check').onclick = async () => {
       st.text = ta.value.trim();
       if (!st.text) { toast('Type an answer, or tap “I don’t know”.'); return; }
-      if (!config.apiKey) { st.phase = 'self'; renderCard(); return; }
+      if (!user) { st.phase = 'self'; renderCard(); return; }
       st.phase = 'grading'; renderCard();
       try {
         const g = await gradeAnswer(c, st.text);
@@ -915,14 +871,23 @@ function renderSettings() {
   const root = $('#view-settings'), s = store.settings;
   const segOpts = (name, cur, opts) => `<div class="seg seg-row" data-seg="${name}">${opts.map(([v, l]) => `<button data-v="${v}" class="${cur === v ? 'on' : ''}">${l}</button>`).join('')}</div>`;
   const account = !sb
-    ? `<div class="list-row"><span class="row-label">Status</span><span class="row-value">Not connected</span></div>`
+    ? `<div class="list-row"><span class="row-label">Status</span><span class="row-value">Not configured</span></div>`
     : (user
-      ? `<div class="list-row"><span class="row-label">Account</span><span class="row-value">${esc(user.email || '')}</span></div>
+      ? `<div class="list-row"><span class="row-label">Signed in as</span><span class="row-value">${esc(user.email || '')}</span></div>
          <button class="list-row row-action" id="st-sync">Sync now</button>
          <button class="list-row row-action destructive" id="st-out">Sign out</button>`
-      : `<button class="list-row row-action" id="st-in">Sign in or create account</button>`);
+      : `<button class="list-row row-action" id="st-in">Sign in</button>`);
+  const accountFoot = !sb
+    ? 'This server has no SUPABASE_URL or SUPABASE_PUBLISHABLE_KEY, so notes stay on this device and questions can’t be generated.'
+    : (user ? 'Notes and questions sync to every device signed in to this account.' : 'Use the same account as margin. Signing in turns on sync and question generation.');
   root.innerHTML = `<div class="settings">
     <h1 class="large-title">Settings</h1>
+
+    <section class="group">
+      <h2 class="group-title">Account</h2>
+      <div class="list-group">${account}</div>
+      <p class="group-foot">${accountFoot}</p>
+    </section>
 
     <section class="group">
       <h2 class="group-title">Review</h2>
@@ -935,26 +900,6 @@ function renderSettings() {
           <textarea id="st-guide" rows="3" placeholder="For example: I’m preparing for system design interviews. Ask about trade-offs and why, not definitions.">${esc(s.guidance)}</textarea></label>
       </div>
       <p class="group-foot">Tapping “Too trivial” or “Key idea” during review also shapes future questions.</p>
-    </section>
-
-    <section class="group">
-      <h2 class="group-title">Claude</h2>
-      <div class="list-group">
-        <label class="list-row"><span class="row-label">API key</span><input id="st-api" type="password" value="${esc(config.apiKey)}" placeholder="sk-ant-…" autocomplete="off"></label>
-        <label class="list-row"><span class="row-label">Question model</span><input id="st-gen" value="${esc(config.genModel)}"></label>
-        <label class="list-row"><span class="row-label">Grading model</span><input id="st-grade" value="${esc(config.gradeModel)}"></label>
-      </div>
-      <p class="group-foot">Kept only on this device and sent straight to Anthropic. Use a key made for this app, with a spending limit.</p>
-    </section>
-
-    <section class="group">
-      <h2 class="group-title">Sync</h2>
-      <div class="list-group">
-        <label class="list-row"><span class="row-label">Project URL</span><input id="st-url" value="${esc(config.supabaseUrl)}" placeholder="https://xxxx.supabase.co"></label>
-        <label class="list-row"><span class="row-label">Anon key</span><input id="st-key" value="${esc(config.supabaseKey)}" placeholder="eyJ…"></label>
-        ${account}
-      </div>
-      <p class="group-foot">Run schema.sql once in your Supabase project. Row-level security keeps your notes private to your account.</p>
     </section>
 
     <section class="group">
@@ -984,16 +929,6 @@ function renderSettings() {
     else { config.theme = b.dataset.v; saveConfig(); applyTheme(); }
   });
   on('st-guide', 'onchange', e => { s.guidance = e.target.value; touch(s); });
-  const saveApi = () => {
-    config.apiKey = $('#st-api').value.trim(); config.genModel = $('#st-gen').value.trim() || 'claude-sonnet-5-5'; config.gradeModel = $('#st-grade').value.trim() || 'claude-haiku-5-5';
-    saveConfig(); toast('Saved');
-  };
-  ['st-api', 'st-gen', 'st-grade'].forEach(id => on(id, 'onchange', saveApi));
-  const saveSb = async () => {
-    config.supabaseUrl = $('#st-url').value.trim(); config.supabaseKey = $('#st-key').value.trim(); saveConfig();
-    await initSupabase(); renderSettings(); if (sb) toast('Connected to Supabase');
-  };
-  ['st-url', 'st-key'].forEach(id => on(id, 'onchange', saveSb));
   on('st-in', 'onclick', openAuthModal);
   on('st-out', 'onclick', async () => { await sb.auth.signOut(); });
   on('st-sync', 'onclick', syncNow);
@@ -1017,7 +952,7 @@ function openAuthModal() {
         <input id="au-email" type="email" placeholder="Email" autocomplete="email">
         <input id="au-pass" type="password" placeholder="Password" autocomplete="current-password">
       </div>
-      <p class="sheet-note" id="au-msg">Use the same account on every device to keep notes in sync.</p>
+      <p class="sheet-note" id="au-msg">Same email and password as margin.</p>
       <button class="btn btn-primary btn-lg btn-block" id="au-in">Sign in</button>
       <button class="btn btn-plain btn-block" id="au-up">Create account</button>
     </div>`, () => {

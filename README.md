@@ -1,33 +1,61 @@
 # Recall
 
-Markdown notes that quiz you the next day. Installable Chrome PWA, synced via Supabase, questions written by Claude.
+Markdown notes that quiz you the next day. Write or import notes; Claude picks the few ideas worth keeping and turns them into questions; tomorrow they come back as a short review. Installable on phone and laptop, works offline, syncs between devices.
 
-## Setup (about 10 minutes)
+## Stack
+- **Next.js 15 on Vercel**, used only for three API routes. The app itself is a plain page in `public/` (no React, no build step for the UI). Same setup as margin.
+- **Supabase**: Postgres plus Auth. Shares margin's project and login; Recall's tables (`notes`, `cards`, `user_settings`) don't touch margin's `items`.
+- **Claude**: called from `app/api/generate` and `app/api/grade`. The key stays on the server and only `ALLOWED_EMAIL` can use it.
+- **Offline**: a service worker caches the app; notes live in local storage and sync when you're back online.
 
-1. **Supabase**: create a free project at supabase.com. Open *SQL Editor*, paste `schema.sql`, run it.
-   In *Authentication → Providers → Email*, turn off "Confirm email" if you don't want to confirm by mail.
-   In *Project Settings → API*, copy the **Project URL** and the **anon public** key.
-2. **Host it**: this repo is ready for GitHub Pages — *Settings → Pages → Build and deployment → Deploy from a branch → `main` / root*. Your app is then at `https://<user>.github.io/<repo>/`. (Or drag the folder onto app.netlify.com/drop.)
-3. **Open the URL in Chrome**, go to *Settings* in the app, paste the Supabase URL + anon key, press *Save connection*, then *Sign in / create account*.
-4. Still in *Settings*, paste a Claude API key (console.anthropic.com) and save. Do this on each device; the key is never synced.
-5. Install: Chrome menu → *Install Recall* (or the button in Settings).
+## Project layout
+```
+app/api/generate/route.js  POST /api/generate: note → review questions (owner only)
+app/api/grade/route.js     POST /api/grade: typed answer → verdict + feedback (owner only)
+app/api/config/route.js    served as /config.js: hands the browser the public Supabase URL and key
+lib/server.js              who is calling, and the call to Claude
+public/index.html          markup
+public/styles.css          styles (tokens at the top; dark mode redefines them)
+public/app.js              all app logic, split into commented sections
+public/sw.js               offline cache (bump CACHE to force-refresh every device)
+supabase/schema.sql        tables, row-level security
+```
 
-## How it works
+## Setup
 
-- **Add notes**: write in the editor, or use the import button next to *New note* (.md/.txt files, pasted text, or drag files onto the window). Uploads generate questions immediately. For notes you write by hand, press *Add to review* when you're done.
-- **Questions**: Claude reads the whole note and decides what is worth retaining. It skips trivia and can return nothing. Mix of multiple choice and free recall (graded by Claude, with candid feedback).
-- **Next day**: new questions become due the day after you add them. The Review tab shows today's set, capped by your daily limit (Settings).
-- **Teaching it what you want**: during review tap *Too trivial* (mutes the card and is used as a "don't ask this kind" example next time), *Too easy*, or *Key idea*. Settings also has a free-text box for telling the model what you care about, and a density setting.
-- **Scheduling**: simple SM-2 style. Pass → 3 days → 7 days → growing by ease. Miss → back to 1 day, and asked again at the end of the same session.
-- **Study ahead** lets you pull future cards forward (useful for trying it out on day 1).
+1. **Supabase** (margin's project): SQL Editor → New query → paste `supabase/schema.sql` → Run.
+2. **Local**
+   ```bash
+   npm install
+   cp .env.local.example .env.local   # same four values as margin's .env.local
+   npm run dev                        # http://localhost:3000
+   ```
+3. **Deploy**: Vercel → Add New → Project → import `recall` (framework: Next.js, nothing to change). Add the env vars below, then deploy.
+4. **Install**: open the Vercel URL in Chrome → install icon in the address bar (phone: Add to Home Screen). Sign in with your margin account.
 
-## Design
+## Working on it
+- Edit files in `public/`, refresh `localhost:3000`. No build step for the UI.
+- Ship it:
+  ```bash
+  git add -A && git commit -m "what changed" && git push
+  ```
+  Vercel deploys every push to `main` automatically, usually in under a minute.
+- `npm run build` before pushing if you've touched anything in `app/` or `lib/`.
+- If a device seems stuck on an old version, bump `CACHE` in `public/sw.js`.
 
-Apple-style UI: SF Pro on Apple devices (Inter, bundled, everywhere else), system blue, grouped lists, sheets, and a bottom tab bar on phones. Follows your system's light/dark setting, or pick one in Settings → Appearance. The editor styles Markdown as you type (markers fade, bold and headings show bold); switch to Read for the fully rendered note. Cmd/Ctrl+K jumps to search.
+## Environment variables
+| Name | What |
+|---|---|
+| `SUPABASE_URL` | Project URL (same as margin) |
+| `SUPABASE_PUBLISHABLE_KEY` | Publishable (or legacy anon) key. Safe to expose; RLS does the locking. |
+| `ANTHROPIC_API_KEY` | Claude API key. Server only. |
+| `ALLOWED_EMAIL` | The only account allowed to generate and grade questions. |
+| `CLAUDE_MODEL` | Optional. Writes questions. Defaults to `claude-sonnet-5-5`. |
+| `CLAUDE_GRADE_MODEL` | Optional. Grades typed answers. Defaults to `claude-haiku-5-5`. |
+| `CLAUDE_EFFORT` | Optional. `low` (default), `medium`, `high` or `off`. |
 
-## Notes and limits
-
-- Data lives in the browser's localStorage and syncs to Supabase (last write wins per note/card). About 5 MB of local storage is plenty for text notes.
-- The Claude API key sits in this browser and calls go straight to Anthropic. Use a dedicated key with a spend limit.
-- Wikilinks `[[Note title]]` work in preview and create the note if it doesn't exist. Backlinks appear under each note. No graph view.
-- Don't open the app from `file://`; the service worker and install need https (or localhost).
+## How reviews work
+- New questions are due the day after you add a note to review. The Review tab shows today's set, capped by "Questions per day" in Settings.
+- Claude reads the whole note and keeps only what matters; it can return nothing. Multiple choice and free recall, with free recall graded by Claude.
+- During review, **Too trivial** mutes a question and steers future ones away from that kind; **Key idea** does the opposite. Settings has a box for telling it what you care about.
+- Scheduling: pass → 3 days → 7 days → growing. Miss → back to 1 day, and asked again at the end of the session.

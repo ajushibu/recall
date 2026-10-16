@@ -1,7 +1,7 @@
 // Network-first for the app shell (so updates arrive), cache fallback for offline.
-const CACHE = 'recall-v2';
+const CACHE = 'recall-v3';
 const SHELL = [
-  './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
+  './', 'index.html', 'config.js', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png', 'vendor/inter.woff2',
   'vendor/marked.umd.js', 'vendor/purify.min.js', 'vendor/supabase.js'
 ];
@@ -22,7 +22,7 @@ self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
   const url = new URL(req.url);
-  if (url.origin !== self.location.origin) return; // Supabase + Claude API go straight to network
+  if (url.origin !== self.location.origin) return; // Supabase goes straight to network; /api/* are POSTs
   e.respondWith(
     fetch(req)
       .then(res => {
