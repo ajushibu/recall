@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Recall</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app">
+  <nav id="nav" aria-label="Main">
+    <div class="nav-brand"><span class="nav-logo" aria-hidden="true"></span><span>Recall</span></div>
+    <div class="nav-tabs">
+      <button class="tab active" data-view="notes" aria-current="page"><span class="tab-label">Notes</span></button>
+      <button class="tab" data-view="review"><span class="tab-label">Review</span><b id="badge" class="badge" hidden>0</b></button>
+      <button class="tab" data-view="settings"><span class="tab-label">Settings</span></button>
+    </div>
+    <div id="sync-status" class="sync" data-state="off" title="Local only"><i></i><span>Local only</span></div>
+  </nav>
+  <main>
+    <section id="view-notes" class="view">
+      <aside id="sidebar">
+        <header class="list-head">
+          <div class="list-title-row">
+            <h1 class="large-title">Notes</h1>
+            <div class="list-actions">
+              <button class="icon-btn" id="btn-add" title="Import or paste" aria-label="Import or paste"></button>
+              <button class="icon-btn accent" id="btn-new" title="New note" aria-label="New note"></button>
+            </div>
+          </div>
+          <label class="search"><span id="search-ico" class="search-ico"></span><input id="search" type="search" placeholder="Search" autocomplete="off" aria-label="Search notes"></label>
+        </header>
+        <div id="note-list" class="note-list"></div>
+        <footer class="list-foot" id="list-foot"></footer>
+      </aside>
+      <div id="editor-pane"></div>
+    </section>
+    <section id="view-review" class="view" hidden></section>
+    <section id="view-settings" class="view" hidden></section>
+  </main>
+</div>
+<input type="file" id="file-input" accept=".md,.markdown,.txt,text/markdown,text/plain" multiple hidden>
+<div id="dropzone" hidden><div>Drop to add notes</div></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="modal" hidden></div>
+<script src="vendor/marked.umd.js"></script>
+<script src="vendor/purify.min.js"></script>
+<script src="vendor/supabase.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
