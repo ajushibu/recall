@@ -221,7 +221,9 @@ async function pullTable(table, map) {
       const { user_id, server_ts, ...rec } = row;
       DATE_FIELDS.forEach(f => { if (rec[f]) rec[f] = isoNorm(rec[f]); });
       const local = map[rec.id];
-      if (!local || !local._dirty || ms(rec.updated_at) >= ms(local.updated_at)) map[rec.id] = { ...rec, _dirty: false };
+      // Update in place: the editor, a running question generation or an open review may hold this object.
+      if (!local) map[rec.id] = { ...rec, _dirty: false };
+      else if (!local._dirty || ms(rec.updated_at) >= ms(local.updated_at)) { Object.assign(local, rec); local._dirty = false; }
       if (server_ts > since) since = server_ts;
     }
     store.lastSync[table] = since;
@@ -245,7 +247,7 @@ async function syncSettings() {
   if (data && data[0]) {
     const r = data[0];
     if (!store.settings._dirty && ms(r.updated_at) >= ms(store.settings.updated_at)) {
-      store.settings = { daily_cap: r.daily_cap, density: r.density, guidance: r.guidance || '', updated_at: isoNorm(r.updated_at), _dirty: false };
+      Object.assign(store.settings, { daily_cap: r.daily_cap, density: r.density, guidance: r.guidance || '', updated_at: isoNorm(r.updated_at), _dirty: false });
     }
     store.lastSync.user_settings = r.server_ts;
   }
@@ -266,7 +268,7 @@ async function syncNow() {
     await syncSettings();
     await pullTable('notes', store.notes);
     await pullTable('cards', store.cards);
-    persistNow();
+    healReviewMarks(); persistNow();
     setSync('ok', 'Synced ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
     refreshAfterSync();
   } catch (e) {
@@ -1002,7 +1004,19 @@ function wire() {
   setInterval(() => { syncNow(); if (ui.view === 'review' && !session) renderReview(); updateBadge(); }, 60000);
 }
 
+// Notes hit by the old sync bug have questions but no "in review" mark. Restore it so they don't get duplicate questions.
+function healReviewMarks() {
+  for (const n of liveNotes()) {
+    if (n.gen_hash) continue;
+    const cs = cardsOf(n.id);
+    if (!cs.length) continue;
+    n.gen_hash = noteHash(n); n.gen_at = cs.map(c => c.created_at).sort().pop(); n._dirty = true;
+  }
+  persist();
+}
+
 async function init() {
+  healReviewMarks();
   applyTheme();
   wire();
   if (!isNarrow()) { const first = liveNotes().sort((a, b) => b.updated_at.localeCompare(a.updated_at))[0]; if (first) ui.noteId = first.id; }
@@ -1011,6 +1025,6 @@ async function init() {
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
-window.Recall = { get store() { return store; }, config, generateCards, buildQueue, aheadQueue, applySRS, startSession, commitReview, newNote, renderMD, ui, setView, get session() { return session; }, _setStore: s => { store = s; } };
+window.Recall = { get store() { return store; }, config, syncNow, generateCards, buildQueue, aheadQueue, applySRS, startSession, commitReview, newNote, renderMD, ui, setView, get session() { return session; }, _setStore: s => { store = s; } };
 init();
 })();

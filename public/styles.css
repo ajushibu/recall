@@ -282,7 +282,7 @@ details[open] > summary.extra-title::after { transform: rotate(45deg) translate(
 .ring-center { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; }
 .ring-center strong { font-size: 46px; line-height: 1; font-weight: 700; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
 .ring-center span { font-size: 13px; color: var(--label-2); margin-top: 4px; }
-.ring-check { color: var(--ring, var(--accent)); }
+.ring-center .ring-check { color: var(--ring, var(--accent)); margin: 0; }
 .ring-check .ico { width: 60px; height: 60px; stroke-width: 2.4; }
 .rv-headline { font-size: 28px; line-height: 1.2; font-weight: 700; letter-spacing: -.026em; }
 .rv-sub { color: var(--label-2); margin: 8px 0 30px; max-width: 360px; font-size: 15px; }
