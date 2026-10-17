@@ -67,6 +67,7 @@ Same as margin's Library:
 
 ## How reviews work
 - New questions are due the day after you add a note to review. The Review tab shows today's set, capped by "Questions per day" in Settings.
+- **Study now**: once a note has questions, a *Study now* button appears on it. That first pass counts. A miss marks the question shaky (importance up, asked first tomorrow, and again at the end of the session). A pass keeps it due tomorrow, because remembering something minutes after reading it proves little. *Too trivial* removes a question for good, even before you answer it. First passes don't use up the daily cap.
 - Claude reads the whole note and keeps only what matters; it can return nothing. Multiple choice and free recall, with free recall graded by Claude.
 - During review, **Too trivial** mutes a question and steers future ones away from that kind; **Key idea** does the opposite. Settings has a box for telling it what you care about.
 - Scheduling: pass → 3 days → 7 days → growing. Miss → back to 1 day, and asked again at the end of the session.

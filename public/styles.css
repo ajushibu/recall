@@ -198,6 +198,10 @@ main { flex: 1; min-width: 0; min-height: 0; position: relative; }
 .ed-doc:has([data-mode="split"]) { max-width: 1240px; }
 .ed-date { display: block; text-align: center; font-size: 12px; color: var(--label-2); margin-bottom: 22px; }
 .ed-title { width: 100%; padding: 0; font: 700 30px/1.2 var(--font-title, var(--font)); letter-spacing: -.026em; }
+.ed-status-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 26px; flex-wrap: wrap; }
+.ed-status-row .ed-status { margin: 0; }
+.btn-sm { padding: 6px 14px; font-size: 13px; min-height: 0; border-radius: 999px; font-weight: 600; }
+.shaky { width: 100%; max-width: 420px; text-align: left; margin: 0 0 24px; }
 .ed-status { margin: 8px 0 26px; font-size: 13px; color: var(--label-2); display: flex; align-items: center; gap: 7px; }
 .ed-status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--label-3); }
 .ed-status-done::before { background: var(--green); }

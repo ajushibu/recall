@@ -169,9 +169,20 @@ function applySRS(c, rating) {
   c.due = addDays(today(), c.interval_days);
 }
 
+/* A card's first pass happens the day it is made. Remembering something minutes after reading it
+   proves little, so a pass keeps it due tomorrow; a miss marks it shaky (importance up, asked first). */
+const isFirstPass = c => !c.last_reviewed && c.due > today();
+function applyFirstPass(c, rating) {
+  if (rating === 'again') { c.lapses++; c.ease = Math.max(1.3, c.ease - 0.2); c.importance = Math.min(5, c.importance + 1); }
+  else if (rating === 'hard') c.ease = Math.max(1.3, c.ease - 0.1);
+  else if (rating === 'easy') { c.interval_days = 3; c.due = addDays(today(), 3); return; }
+  c.interval_days = 1; c.due = addDays(today(), 1);
+}
+const unseenCards = noteId => cardsOf(noteId).filter(c => c.status === 'active' && !c.deleted && !c.last_reviewed);
+
 const activeCards = () => Object.values(store.cards).filter(c => !c.deleted && c.status === 'active' && store.notes[c.note_id] && !store.notes[c.note_id].deleted);
 const dueCards = () => { const t = today(); return activeCards().filter(c => c.due <= t); };
-const reviewedToday = () => { const t = today(); return Object.values(store.cards).filter(c => c.last_reviewed && dateKey(new Date(c.last_reviewed)) === t).length; };
+const reviewedToday = () => { const t = today(); return Object.values(store.cards).filter(c => c.last_reviewed && dateKey(new Date(c.last_reviewed)) === t && dateKey(new Date(c.created_at)) !== t).length; };
 
 function buildQueue(extra = 0) {
   const t = today();
@@ -750,7 +761,7 @@ function renderEditor() {
       <article class="ed-doc">
         <p class="ed-meta"><button class="ed-where" id="ed-where" title="Move to another folder">${folderChipHTML(n)}</button><time class="ed-date">${esc(fmtLongDate(n.updated_at))}</time></p>
         <input id="ed-title" class="ed-title" value="${esc(n.title)}" placeholder="Title" aria-label="Title">
-        <p class="ed-status ed-status-${st.kind}" id="ed-status">${esc(st.text)}</p>
+        <div class="ed-status-row"><p class="ed-status ed-status-${st.kind}" id="ed-status">${esc(st.text)}</p><button class="btn btn-tinted btn-sm" id="ed-study" hidden></button></div>
         <div class="ed-body" id="ed-body">
           <div class="ed-write">
             <div class="ed-mirror" id="ed-mirror" aria-hidden="true"></div>
@@ -762,7 +773,7 @@ function renderEditor() {
       </article>
     </div>`;
   $('#ed-text').value = n.body;
-  paintMode(); updatePreview(); renderExtras(); autoGrow();
+  paintMode(); updatePreview(); renderExtras(); autoGrow(); refreshStatus();
 
   $('#ed-back').onclick = () => { ui.noteId = null; renderList(); renderEditor(); };
   $('#ed-title').oninput = e => { n.title = e.target.value; touch(n); renderList(); refreshStatus(); };
@@ -836,6 +847,8 @@ function refreshStatus() {
   const n = store.notes[ui.noteId]; if (!n) return;
   const st = noteState(n), s = $('#ed-status'), q = $('#ed-queue');
   if (s) { s.textContent = st.text; s.className = `ed-status ed-status-${st.kind}`; }
+  const sb2 = $('#ed-study'), u = unseenCards(n.id).length;
+  if (sb2) { sb2.hidden = !u; sb2.textContent = `Study now · ${u}`; sb2.onclick = () => studyNote(n.id); }
   if (q && !q.dataset.busy) { q.className = `pill pill-${st.kind}`; q.innerHTML = `${st.kind === 'done' ? I.check : I.sparkle}<span>${st.label}</span>`; }
 }
 function renderExtras() {
@@ -890,7 +903,7 @@ async function queueNote(n, { quiet = false } = {}) {
     const r = await generateCards(n);
     if (r.tooShort) toast('Write a little more before adding this to review.');
     else if (r.empty) toast('Nothing in this note looked worth quizzing on.');
-    else toast(`${plural(r.added, 'question')} added · first review tomorrow`);
+    else toast(`${plural(r.added, 'question')} added · study now or tomorrow`);
   } catch (e) { toast(e.message, 5000); }
   finally {
     const b = $('#ed-queue'); if (b) { delete b.dataset.busy; b.disabled = false; }
@@ -924,7 +937,7 @@ function openAddModal() {
         <input id="add-title" placeholder="Title (optional)">
         <textarea id="add-text" placeholder="Paste notes here…"></textarea>
       </div>
-      <p class="sheet-note">Questions are generated right away and first appear in tomorrow’s review.</p>
+      <p class="sheet-note">Questions are generated right away. Study them now from the note, or they show up in tomorrow’s review.</p>
     </div>`, () => {
     $('#add-cancel').onclick = closeModal;
     $('#add-files').onclick = () => { closeModal(); $('#file-input').click(); };
@@ -996,7 +1009,7 @@ function renderReview() {
   if (queue.length) { headline = done ? `${plural(queue.length, 'question')} to go` : `${plural(queue.length, 'question')} today`; sub = done ? `${done} done so far` : 'A few minutes, picked from what you added.'; }
   else if (done) { headline = 'You’re done for today'; sub = `${plural(done, 'question')} reviewed. More tomorrow.`; }
   else if (total) { headline = 'Nothing due today'; sub = `Next review ${fmtDay(activeCards().map(c => c.due).sort()[0])}.`; }
-  else { headline = 'No questions yet'; sub = 'Add a note to review and its key ideas show up here tomorrow.'; }
+  else { headline = 'No questions yet'; sub = 'Add a note to review. You can study its questions right away, and they come back here tomorrow.'; }
 
   root.innerHTML = `<div class="rv-home">
     ${!total ? `<div class="rv-empty-icon">${I.cards}</div>` : `<div class="ring-wrap${done && !queue.length ? ' complete' : ''}">
@@ -1024,27 +1037,37 @@ function renderReview() {
   on('rv-go-notes', () => setView('notes'));
 }
 
-function startSession(ids) {
+function startSession(ids, opts = {}) {
   if (!ids.length) return;
-  session = { queue: ids.slice(), idx: 0, passed: 0, answered: 0, retry: new Set(), st: null };
+  session = { queue: ids.slice(), idx: 0, passed: 0, answered: 0, retry: new Set(), st: null, missed: [], removed: 0, noteId: opts.noteId || null };
   renderCard();
+}
+/* study the questions from one note the day they were made */
+function studyNote(noteId) {
+  const ids = unseenCards(noteId).sort((a, b) => b.importance - a.importance).map(c => c.id);
+  if (!ids.length) { toast('Nothing new to study in this note.'); return; }
+  setView('review');
+  startSession(ids, { noteId });
 }
 function finishSession() {
   const s = session; session = null; syncSessionClass();
   const root = $('#view-review');
   const tmrw = activeCards().filter(c => c.due === addDays(today(), 1)).length;
-  const left = buildQueue().length;
+  const left = s.noteId ? 0 : buildQueue().length;
+  const shaky = (s.missed || []).map(id => store.cards[id]).filter(c => c && c.status === 'active');
+  const nTitle = s.noteId && store.notes[s.noteId] ? store.notes[s.noteId].title : '';
   const pct = s.answered ? s.passed / s.answered : 0;
   root.innerHTML = `<div class="rv-home rv-done">
     <div class="ring-wrap complete">${ring(1)}<div class="ring-center"><span class="ring-check">${I.check}</span></div></div>
     <h1 class="rv-headline">Session complete</h1>
-    <p class="rv-sub">You remembered ${s.passed} of ${s.answered}${s.answered ? ` (${Math.round(pct * 100)}%)` : ''}. ${tmrw ? `${plural(tmrw, 'question')} tomorrow.` : ''}</p>
+    <p class="rv-sub">You remembered ${s.passed} of ${s.answered}${s.answered ? ` (${Math.round(pct * 100)}%)` : ''}.${s.removed ? ` ${plural(s.removed, 'question')} removed.` : ''} ${tmrw ? `${plural(tmrw, 'question')} tomorrow.` : ''}</p>
+    ${shaky.length ? `<section class="shaky"><h2 class="group-title">Shaky, so they come back first tomorrow</h2><div class="list-group">${shaky.map(c => `<div class="list-row stacked"><span>${esc(c.question)}</span></div>`).join('')}</div></section>` : ''}
     <div class="rv-actions">
       ${left ? `<button class="btn btn-primary btn-lg" id="rv-cont">Keep going · ${left} left</button>` : ''}
-      <button class="btn ${left ? 'btn-plain' : 'btn-tinted btn-lg'}" id="rv-done">Done</button>
+      <button class="btn ${left ? 'btn-plain' : 'btn-tinted btn-lg'}" id="rv-done">${nTitle ? 'Back to note' : 'Done'}</button>
     </div></div>`;
   const c = $('#rv-cont'); if (c) c.onclick = () => startSession(buildQueue());
-  $('#rv-done').onclick = renderReview;
+  $('#rv-done').onclick = () => { if (s.noteId && store.notes[s.noteId]) { ui.noteId = s.noteId; setView('notes'); } else renderReview(); };
   updateBadge();
 }
 
@@ -1063,10 +1086,11 @@ function renderCard() {
   let body = '', foot = '';
 
   if (st.phase === 'ask' && c.type === 'mcq') {
+    foot = `<button class="btn btn-plain" id="rv-triv">Too trivial, remove</button>`;
     body = `<div class="choices">${st.opts.map((o, i) => `<button class="choice" data-i="${i}"><span class="choice-mark"></span><span class="choice-text">${esc(o)}</span></button>`).join('')}</div>`;
   } else if (st.phase === 'ask') {
     body = `<textarea class="answer" id="rv-ans" placeholder="Answer in your own words…" rows="5">${esc(st.text)}</textarea>`;
-    foot = `<button class="btn btn-plain" id="rv-idk">I don’t know</button><button class="btn btn-primary btn-lg" id="rv-check">Check</button>`;
+    foot = `<button class="btn btn-plain" id="rv-triv">Too trivial</button><button class="btn btn-plain" id="rv-idk">I don’t know</button><button class="btn btn-primary btn-lg" id="rv-check">Check</button>`;
   } else if (st.phase === 'grading') {
     body = `<div class="answer answer-ro">${esc(st.text)}</div><div class="grading"><span class="spin"></span>Checking your answer…</div>`;
   } else if (st.phase === 'self') {
@@ -1118,6 +1142,11 @@ function renderCard() {
 
   $('#rv-quit').onclick = () => { if (session.answered) finishSession(); else { session = null; renderReview(); } };
 
+  const triv = $('#rv-triv');
+  if (triv) triv.onclick = () => {
+    c.status = 'suppressed'; c.feedback = 'trivial'; touch(c);
+    session.removed++; session.idx++; session.st = null; updateBadge(); renderCard();
+  };
   if (st.phase === 'ask' && c.type === 'mcq') {
     $$('.choice', root).forEach(b => b.onclick = () => {
       st.picked = st.opts[+b.dataset.i]; st.suggestion = st.picked === c.answer ? 'good' : 'again'; st.phase = 'result'; renderCard();
@@ -1161,12 +1190,14 @@ function commitReview(c, st) {
     c.status = 'suppressed'; c.feedback = 'trivial';
   } else {
     if (st.chips.easy && rating === 'good') rating = 'easy';
-    if (!isRetry) applySRS(c, rating);
+    if (!isRetry) { if (isFirstPass(c)) applyFirstPass(c, rating); else applySRS(c, rating); }
     if (st.chips.key) { c.importance = 5; c.feedback = 'useful'; }
   }
   if (!isRetry) c.last_reviewed = nowISO();
   touch(c);
   if (!isRetry) { session.answered++; if (rating !== 'again' && !st.chips.trivial) session.passed++; }
+  if (rating === 'again' && !isRetry && !st.chips.trivial) session.missed.push(c.id);
+  if (st.chips.trivial) session.removed++;
   if (rating === 'again' && !isRetry && !st.chips.trivial) { session.retry.add(c.id); session.queue.push(c.id); }
   session.idx++; session.st = null;
   updateBadge(); renderCard();
@@ -1333,6 +1364,7 @@ async function init() {
   if ('serviceWorker' in navigator && location.protocol.startsWith('http')) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
-window.Recall = { get store() { return store; }, config, syncNow, folders, createFolder, moveFolder, moveNote, deleteFolder, folderOf, pathOf, newNoteIn, TR, generateCards, buildQueue, aheadQueue, applySRS, startSession, commitReview, newNote, renderMD, ui, setView, get session() { return session; }, _setStore: s => { store = s; } };
+window.Recall = {
+  studyNote, unseenCards, isFirstPass, getSession: () => session, get store() { return store; }, config, syncNow, folders, createFolder, moveFolder, moveNote, deleteFolder, folderOf, pathOf, newNoteIn, TR, generateCards, buildQueue, aheadQueue, applySRS, startSession, commitReview, newNote, renderMD, ui, setView, get session() { return session; }, _setStore: s => { store = s; } };
 init();
 })();
