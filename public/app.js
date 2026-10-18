@@ -996,6 +996,73 @@ function ring(pct) {
   </svg>`;
 }
 
+/* ───────────── stubborn questions ───────────── */
+const leeches = () => activeCards().filter(c => c.lapses >= 3);
+function leechHTML() {
+  const l = leeches(); if (!l.length) return '';
+  return `<section class="leech"><h2 class="group-title">Stubborn questions</h2>
+    <p class="group-foot">Missed three or more times. Drilling won’t fix a question that’s unclear, so let Claude rewrite it, or keep it as is.</p>
+    <div class="list-group">${l.slice(0, 5).map(c => `<div class="list-row leech-row" data-id="${c.id}">
+      <span class="leech-q">${esc(c.question)}<small>Missed ${c.lapses} times</small></span>
+      <button class="text-btn" data-lc="rewrite">Rewrite</button><button class="text-btn" data-lc="keep">Keep</button></div>`).join('')}</div></section>`;
+}
+function wireLeeches(root, rerender) {
+  $$('[data-lc]', root).forEach(b => b.onclick = async () => {
+    const c = store.cards[b.closest('.leech-row').dataset.id]; if (!c) return;
+    if (b.dataset.lc === 'keep') { c.lapses = 0; touch(c); persist(); scheduleSync(); rerender(); return; }
+    const n = store.notes[c.note_id];
+    $$('[data-lc]', b.closest('.leech-row')).forEach(x => { x.disabled = true; });
+    b.textContent = 'Rewriting…';
+    try {
+      const r = await api('/api/rewrite', { question: c.question, answer: c.answer, explanation: c.explanation, type: c.type, misses: c.lapses, title: n ? n.title : '', body: n ? n.body : '' });
+      const made = (Array.isArray(r.cards) ? r.cards : []).map(x => normalizeCard(x, c.note_id)).filter(Boolean);
+      if (!made.length) { toast(r.diagnosis || 'Claude couldn’t improve this one. The note itself may need a rewrite.', 7000); rerender(); return; }
+      made.forEach(m => { m.importance = Math.max(m.importance, c.importance); store.cards[m.id] = m; });
+      c.deleted = true; touch(c); persist(); scheduleSync();
+      toast(`${r.diagnosis ? r.diagnosis + ' ' : ''}Replaced with ${plural(made.length, 'question')}, back tomorrow.`, 8000);
+    } catch (e) { toast(e.message, 5000); }
+    updateBadge(); rerender();
+  });
+}
+
+/* ───────────── questions that connect notes ───────────── */
+function connectCandidate() {
+  if (!user) return null;
+  const log = loadJSON('recall.connect', {}), now = Date.now(), groups = {};
+  const lastRev = n => cardsOf(n.id).reduce((m, c) => (c.last_reviewed && c.last_reviewed > m ? c.last_reviewed : m), '');
+  liveNotes().forEach(n => { if (n.folder_id && lastRev(n)) (groups[n.folder_id] = groups[n.folder_id] || []).push(n); });
+  const ok = Object.entries(groups).filter(([f, ns]) => ns.length >= 2 && folderById(f) && now - (log[f] || 0) > 7 * 864e5);
+  if (!ok.length) return null;
+  ok.sort((a, b) => b[1].length - a[1].length);
+  const [f, ns] = ok[0];
+  ns.sort((a, b) => lastRev(b).localeCompare(lastRev(a)));
+  return { folder: folderById(f), notes: ns.slice(0, 4) };
+}
+function connectHTML() {
+  const g = connectCandidate(); if (!g) return '';
+  return `<section class="connect"><div><strong>Connect your notes</strong><p>A few questions that compare ideas across ${plural(g.notes.length, 'note')} in ${esc(folderName(g.folder))}.</p></div><button class="btn btn-tinted" id="rv-connect">Try it</button></section>`;
+}
+async function connectNow() {
+  const g = connectCandidate(); if (!g) return;
+  const b = $('#rv-connect'); if (b) { b.disabled = true; b.textContent = 'Reading notes…'; }
+  const log = loadJSON('recall.connect', {});
+  try {
+    const s = store.settings;
+    const byRecent = f => Object.values(store.cards).filter(f).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+    const r = await api('/api/connect', {
+      folder: folderName(g.folder), notes: g.notes.map(n => ({ title: n.title, body: n.body })), guidance: s.guidance,
+      trivial: byRecent(c => c.feedback === 'trivial').slice(0, 10).map(c => c.question),
+      existing: g.notes.flatMap(n => cardsOf(n.id).map(c => c.question))
+    });
+    log[g.folder.id] = Date.now(); saveLocal('recall.connect', log);
+    const made = (Array.isArray(r.cards) ? r.cards : []).map(x => normalizeCard(x, g.notes[0].id)).filter(Boolean);
+    if (!made.length) { toast('These notes don’t connect in a way worth a question yet.', 5000); renderReview(); return; }
+    made.forEach(c => { c.due = today(); c.feedback = 'connect'; store.cards[c.id] = c; });
+    persist(); scheduleSync(); updateBadge();
+    startSession(made.map(c => c.id));
+  } catch (e) { toast(e.message, 5000); renderReview(); }
+}
+
 function renderReview() {
   if (session) return renderCard();
   syncSessionClass();
@@ -1034,6 +1101,8 @@ function renderReview() {
       ${aheadQueue().length ? `<button class="btn btn-plain" id="rv-ahead">Study ahead</button>` : ''}
       ${!total ? `<button class="btn btn-tinted btn-lg" id="rv-go-notes">Go to notes</button>` : ''}
     </div>
+    ${connectHTML()}
+    ${leechHTML()}
     ${total ? `<section class="week" aria-label="Coming up this week">
       <h2 class="week-title">This week</h2>
       <div class="week-bars">${week.map(w => `<div class="wk${w.today ? ' today' : ''}"><span class="wk-n">${w.n || ''}</span><span class="wk-bar"><i style="height:${Math.round(w.n / max * 100)}%"></i></span><span class="wk-l">${esc(w.lbl)}</span></div>`).join('')}</div>
@@ -1045,6 +1114,8 @@ function renderReview() {
   on('rv-ahead', () => startSession(aheadQueue()));
   on('rv-more', () => startSession(buildQueue(5)));
   on('rv-go-notes', () => setView('notes'));
+  on('rv-connect', connectNow);
+  wireLeeches(root, renderReview);
 }
 
 function startSession(ids, opts = {}) {
@@ -1061,6 +1132,9 @@ function studyNote(noteId) {
 }
 function finishSession() {
   const s = session; session = null; syncSessionClass();
+  showDone(s);
+}
+function showDone(s) {
   const root = $('#view-review');
   const tmrw = activeCards().filter(c => c.due === addDays(today(), 1)).length;
   const left = s.noteId ? 0 : buildQueue().length;
@@ -1072,11 +1146,13 @@ function finishSession() {
     <h1 class="rv-headline">Session complete</h1>
     <p class="rv-sub">You remembered ${s.passed} of ${s.answered}${s.answered ? ` (${Math.round(pct * 100)}%)` : ''}.${s.removed ? ` ${plural(s.removed, 'question')} removed.` : ''} ${tmrw ? `${plural(tmrw, 'question')} tomorrow.` : ''}</p>
     ${shaky.length ? `<section class="shaky"><h2 class="group-title">Shaky, so they come back first tomorrow</h2><div class="list-group">${shaky.map(c => `<div class="list-row stacked"><span>${esc(c.question)}</span></div>`).join('')}</div></section>` : ''}
+    ${leechHTML()}
     <div class="rv-actions">
       ${left ? `<button class="btn btn-primary btn-lg" id="rv-cont">Keep going · ${left} left</button>` : ''}
       <button class="btn ${left ? 'btn-plain' : 'btn-tinted btn-lg'}" id="rv-done">${nTitle ? 'Back to note' : 'Done'}</button>
     </div></div>`;
   const c = $('#rv-cont'); if (c) c.onclick = () => startSession(buildQueue());
+  wireLeeches(root, () => showDone(s));
   $('#rv-done').onclick = () => { if (s.noteId && store.notes[s.noteId]) { ui.noteId = s.noteId; setView('notes'); } else renderReview(); };
   updateBadge();
 }
@@ -1142,7 +1218,7 @@ function renderCard() {
     </header>
     <div class="rv-scroll"><div class="rv-inner">
       <div class="rv-card${fresh ? ' enter' : ''}">
-        <p class="rv-source">${isRetry ? 'Once more · ' : ''}${esc(note?.title || '')}</p>
+        <p class="rv-source">${isRetry ? 'Once more · ' : ''}${c.feedback === 'connect' ? 'Connecting notes · ' + esc(folderName(folderById(note?.folder_id))) : esc(note?.title || '')}</p>
         <h2 class="rv-q">${esc(c.question)}</h2>
         ${st.phase === 'ask' && c.gaps && c.gaps.length ? `<p class="cue"><span>Last time you left out</span>${c.gaps.map(g => `<b>${esc(g)}</b>`).join('')}</p>` : ''}
         ${body}
@@ -1207,7 +1283,7 @@ function commitReview(c, st) {
       if (isFirstPass(c)) { applyFirstPass(c, rating); if (rating === 'good' || rating === 'easy') c.gaps = null; }
       else applySRS(c, rating);
     }
-    if (st.chips.key) { c.importance = 5; c.feedback = 'useful'; }
+    if (st.chips.key) { c.importance = 5; if (c.feedback !== 'connect') c.feedback = 'useful'; }
   }
   if (!isRetry) c.last_reviewed = nowISO();
   touch(c);

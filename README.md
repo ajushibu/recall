@@ -12,6 +12,8 @@ Markdown notes that quiz you the next day. Write or import notes; Claude picks t
 ```
 app/api/generate/route.js  POST /api/generate: note → review questions (owner only)
 app/api/grade/route.js     POST /api/grade: typed answer → verdict + feedback (owner only)
+app/api/rewrite/route.js   POST /api/rewrite: a question you keep missing → clearer replacements (owner only)
+app/api/connect/route.js   POST /api/connect: questions that compare ideas across notes in a folder (owner only)
 app/api/config/route.js    served as /config.js: hands the browser the public Supabase URL and key
 lib/server.js              who is calling, and the call to Claude
 public/index.html          markup
@@ -71,4 +73,6 @@ Same as margin's Library:
 - Claude reads the whole note and keeps only what matters; it can return nothing. Multiple choice and free recall, with free recall graded by Claude.
 - During review, **Too trivial** mutes a question and steers future ones away from that kind; **Key idea** does the opposite. Settings has a box for telling it what you care about.
 - **Half-right answers**: when you type an answer, Claude lists the parts you left out as short cues (it never gives the content away). A half-right answer is not a pass: the card comes back tomorrow however far out it had got, shows *Last time you left out…* as a cue, and the grader only counts it correct once those parts are in your answer. After that it takes a short 2-day step before growing again. Needs the `cards.gaps` line at the end of `supabase/schema.sql`; until it is run, the cues live on this device only.
+- **Stubborn questions**: a question missed three or more times is listed on the Review screen and at the end of a session. *Rewrite* has Claude work out why it keeps failing (several parts in one answer, ambiguity, a bare fact, or an unclear note) and replace it with 1–3 narrower questions with a memory hook; they come back tomorrow. *Keep* resets the count.
+- **Connect your notes**: when a folder has two or more notes you've already reviewed, the Review screen offers a few questions that compare ideas across them (at most once a week per folder, on this device). It's a button, not automatic, so nothing is generated or billed unless you tap it. These questions are due today.
 - Scheduling: pass → 3 days → 7 days → growing. Miss → back to 1 day, and asked again at the end of the session.

@@ -1,5 +1,5 @@
 // Network-first for the app shell (so updates arrive), cache fallback for offline.
-const CACHE = 'recall-v7';
+const CACHE = 'recall-v8';
 const SHELL = [
   './', 'index.html', 'config.js', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/maskable-512.png', 'icons/apple-touch-icon.png', 'vendor/inter.woff2',
