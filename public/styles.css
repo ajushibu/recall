@@ -666,3 +666,11 @@ body.side-hidden .side-show { display: inline-flex; }
   .ed-where + .ed-date::before { content: "·"; margin-right: 8px; color: var(--label-3); }
   .ed-bar { gap: 4px; }
 }
+
+/* what you keep leaving out */
+.cue { margin: -4px 0 18px; font-size: 14px; color: var(--label-2); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.cue span { margin-right: 2px; }
+.cue b, .leftout-chips span { font-weight: 600; font-size: 13px; padding: 4px 10px; border-radius: 999px; background: color-mix(in srgb, var(--orange) 16%, transparent); color: var(--orange-text); }
+.leftout { margin: 14px 0 18px; }
+.leftout-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.leftout p { margin: 10px 0 0; font-size: 13px; color: var(--label-2); }

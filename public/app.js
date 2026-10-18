@@ -122,7 +122,7 @@ function normalizeCard(raw, noteId) {
     id: uid(), note_id: noteId, type, question: q, options, answer: ans,
     explanation: String(raw.explanation || '').trim(), importance: imp,
     due: addDays(today(), 1), interval_days: 0, ease: 2.5, reps: 0, lapses: 0,
-    status: 'active', feedback: null, last_reviewed: null,
+    status: 'active', feedback: null, last_reviewed: null, gaps: null,
     created_at: t, updated_at: t, deleted: false, _dirty: true
   };
 }
@@ -149,8 +149,9 @@ async function generateCards(note, { force = false } = {}) {
 
 /* ───────────── free-recall grading ───────────── */
 async function gradeAnswer(card, answer) {
-  const j = await api('/api/grade', { question: card.question, reference: card.answer, answer });
-  return { verdict: ['correct', 'partial', 'wrong'].includes(j.verdict) ? j.verdict : 'wrong', feedback: String(j.feedback || '') };
+  const j = await api('/api/grade', { question: card.question, reference: card.answer, answer, focus: card.gaps || [] });
+  return { verdict: ['correct', 'partial', 'wrong'].includes(j.verdict) ? j.verdict : 'wrong', feedback: String(j.feedback || ''),
+    missing: (Array.isArray(j.missing) ? j.missing : []).map(String).filter(Boolean).slice(0, 4) };
 }
 
 /* ───────────── spaced repetition ───────────── */
@@ -158,7 +159,11 @@ function applySRS(c, rating) {
   if (rating === 'again') {
     c.lapses++; c.reps = 0; c.interval_days = 1; c.ease = Math.max(1.3, c.ease - 0.2);
   } else if (rating === 'hard') {
-    c.interval_days = Math.max(1, Math.round((c.interval_days || 1) * 1.2)); c.ease = Math.max(1.3, c.ease - 0.15); c.reps++;
+    // Half an answer is not a pass: it comes back tomorrow, however far out the card had got.
+    c.interval_days = 1; c.ease = Math.max(1.3, c.ease - 0.15); c.reps = Math.min(c.reps, 1);
+  } else if (c.gaps && c.gaps.length) {
+    // The missing part is finally recalled: don't jump straight back out, take a short step first.
+    c.interval_days = rating === 'easy' ? 3 : 2; c.reps = Math.max(c.reps, 1); c.gaps = null;
   } else {
     if (c.reps === 0) c.interval_days = rating === 'easy' ? 5 : 3;
     else if (c.reps === 1) c.interval_days = rating === 'easy' ? 10 : 7;
@@ -187,7 +192,7 @@ const reviewedToday = () => { const t = today(); return Object.values(store.card
 function buildQueue(extra = 0) {
   const t = today();
   const remaining = Math.max(0, store.settings.daily_cap - reviewedToday()) + extra;
-  const score = c => c.importance * 2 + Math.min(14, daysBetween(c.due, t)) + c.lapses;
+  const score = c => c.importance * 2 + Math.min(14, daysBetween(c.due, t)) + c.lapses + (c.gaps && c.gaps.length ? 3 : 0);
   return dueCards().sort((a, b) => score(b) - score(a)).slice(0, remaining).map(c => c.id);
 }
 function aheadQueue(n = 5) {
@@ -228,6 +233,9 @@ async function probeFolderCols() {
     toast('Folders are saved on this device. Run the folder update in Supabase to sync them.', 6000);
   }
 }
+// "What I keep leaving out" needs cards.gaps. Without the column it is kept on this device only.
+let gapCol = null;
+async function probeGapCol() { const r = await sb.from('cards').select('gaps').limit(1); gapCol = !r.error; if (gapCol) store.gapsPending = false; }
 const DATE_FIELDS = ['created_at', 'updated_at', 'gen_at', 'last_reviewed'];
 
 async function pushTable(table, map) {
@@ -236,6 +244,7 @@ async function pushTable(table, map) {
   const snap = new Map(dirty.map(r => [r.id, r.updated_at]));
   for (const part of chunks(dirty, 200)) {
     const rows = part.map(toRow);
+    if (table === 'cards' && gapCol === false) rows.forEach(r => { delete r.gaps; });
     if (table === 'notes' && folderCols === false) rows.forEach(r => { if (r.folder_id) store.foldersPending = true; delete r.folder_id; });
     const { error } = await sb.from(table).upsert(rows, { onConflict: 'id' });
     if (error) throw error;
@@ -296,6 +305,7 @@ async function syncNow() {
   syncing = true; setSync('busy', 'Syncing…');
   try {
     if (folderCols !== true) await probeFolderCols();
+    if (gapCol !== true) await probeGapCol();
     await pushTable('notes', store.notes);
     await pushTable('cards', store.cards);
     await syncSettings();
@@ -1109,6 +1119,7 @@ function renderCard() {
     }).join('')}</div>` : (st.text ? `<div class="answer answer-ro">${esc(st.text)}</div>` : '');
     body = `${mcq}
       <div class="verdict v-${v[0]}">${v[1]}<span>${v[2]}</span></div>
+      ${st.suggestion !== 'good' && st.missing && st.missing.length ? `<div class="leftout"><span class="row-cap">You left out</span><div class="leftout-chips">${st.missing.map(m => `<span>${esc(m)}</span>`).join('')}</div><p>Comes back tomorrow with these as a cue, until you can say them without help.</p></div>` : ''}
       <div class="list-group reveal">
         ${c.type === 'recall' ? `<div class="list-row stacked"><span class="row-cap">Answer</span><span>${esc(c.answer)}</span></div>` : ''}
         ${st.feedback ? `<div class="list-row stacked"><span class="row-cap">Feedback</span><span>${esc(st.feedback)}</span></div>` : ''}
@@ -1133,6 +1144,7 @@ function renderCard() {
       <div class="rv-card${fresh ? ' enter' : ''}">
         <p class="rv-source">${isRetry ? 'Once more · ' : ''}${esc(note?.title || '')}</p>
         <h2 class="rv-q">${esc(c.question)}</h2>
+        ${st.phase === 'ask' && c.gaps && c.gaps.length ? `<p class="cue"><span>Last time you left out</span>${c.gaps.map(g => `<b>${esc(g)}</b>`).join('')}</p>` : ''}
         ${body}
       </div>
       ${foot ? `<footer class="rv-foot">${foot}</footer>` : ''}
@@ -1164,7 +1176,7 @@ function renderCard() {
       st.phase = 'grading'; renderCard();
       try {
         const g = await gradeAnswer(c, st.text);
-        st.suggestion = { correct: 'good', partial: 'hard', wrong: 'again' }[g.verdict]; st.feedback = g.feedback; st.phase = 'result';
+        st.suggestion = { correct: 'good', partial: 'hard', wrong: 'again' }[g.verdict]; st.feedback = g.feedback; st.missing = g.missing; st.phase = 'result';
       } catch (e) { toast('Couldn’t grade that — rate yourself. ' + e.message, 5000); st.phase = 'self'; }
       if (session && session.st === st) renderCard();
     };
@@ -1190,7 +1202,11 @@ function commitReview(c, st) {
     c.status = 'suppressed'; c.feedback = 'trivial';
   } else {
     if (st.chips.easy && rating === 'good') rating = 'easy';
-    if (!isRetry) { if (isFirstPass(c)) applyFirstPass(c, rating); else applySRS(c, rating); }
+    if (!isRetry) {
+      if (rating === 'hard' && st.missing && st.missing.length) c.gaps = st.missing.slice(0, 4);
+      if (isFirstPass(c)) { applyFirstPass(c, rating); if (rating === 'good' || rating === 'easy') c.gaps = null; }
+      else applySRS(c, rating);
+    }
     if (st.chips.key) { c.importance = 5; c.feedback = 'useful'; }
   }
   if (!isRetry) c.last_reviewed = nowISO();

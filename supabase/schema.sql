@@ -89,3 +89,4 @@ create policy "own settings" on public.user_settings
 -- Folders (added with the Library). Safe to run more than once.
 alter table public.notes add column if not exists folder_id text;
 alter table public.user_settings add column if not exists folders jsonb not null default '[]'::jsonb;
+alter table public.cards add column if not exists gaps jsonb;
