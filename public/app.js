@@ -1201,6 +1201,7 @@ function renderCard() {
         ${st.feedback ? `<div class="list-row stacked"><span class="row-cap">Feedback</span><span>${esc(st.feedback)}</span></div>` : ''}
         ${c.explanation ? `<div class="list-row stacked"><span class="row-cap">Why</span><span>${esc(c.explanation)}</span></div>` : ''}
       </div>
+      ${c.type === 'recall' && st.text && st.suggestion !== 'good' && !st.overridden ? `<button class="btn btn-plain appeal" id="rv-right">I think I was right</button>` : ''}
       <div class="tune" role="group" aria-label="Tune future questions">
         <button class="chip${st.chips.trivial ? ' on' : ''}" data-chip="trivial">${I.eyeSlash}Too trivial</button>
         <button class="chip${st.chips.easy ? ' on' : ''}" data-chip="easy">${I.bolt}Too easy</button>
@@ -1267,6 +1268,8 @@ function renderCard() {
       if ((k === 'easy' || k === 'key') && st.chips[k]) st.chips.trivial = false;
       renderCard();
     });
+    const right = $('#rv-right');
+    if (right) right.onclick = () => { st.suggestion = 'good'; st.missing = []; st.overridden = true; st.feedback = (st.feedback ? st.feedback + ' ' : '') + '(Marked correct by you.)'; renderCard(); };
     $('#rv-next').onclick = () => commitReview(c, st);
   }
 }

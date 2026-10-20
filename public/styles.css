@@ -685,3 +685,5 @@ body.side-hidden .side-show { display: inline-flex; }
 .connect > div { flex: 1; min-width: 0; }
 .connect strong { font-size: 15px; }
 .connect p { margin: 2px 0 0; font-size: 13px; color: var(--label-2); }
+
+.appeal { align-self: flex-start; margin: 2px 0 10px; }
